@@ -22,6 +22,35 @@ TAIL_CONTEXT_ROWS = 8
 RANDOM_CONTEXT_ROWS = 12
 DOCUMENT_EXTENSIONS = {".md", ".markdown", ".txt", ".pdf", ".docx", ".doc", ".pages", ".rtf"}
 DOCUMENT_CHUNK_CHARS = 1600
+PROFILE_FULL_SCAN_ROW_LIMIT = 5000
+PROFILE_SAMPLE_ROWS = 5000
+RELATION_VALUE_SAMPLE_LIMIT = 5000
+RELATION_COLUMN_LIMIT_PER_TABLE = 24
+RELATION_KEY_TOKENS = (
+    "id",
+    "code",
+    "key",
+    "no",
+    "cust",
+    "customer",
+    "sku",
+    "prod",
+    "product",
+    "store",
+    "shop",
+    "route",
+    "emp",
+    "mgr",
+    "org",
+    "user",
+    "客户",
+    "终端",
+    "商品",
+    "门店",
+    "路线",
+    "员工",
+    "经理",
+)
 
 
 @dataclass(frozen=True)
@@ -268,18 +297,27 @@ def build_csv_profile(df: pd.DataFrame, csv_text: str, original_filename: str) -
     columns: list[dict[str, Any]] = []
     for name in df.columns:
         series = df[name]
+        profile_series, profile_is_sampled = _profile_series(series)
         sample_values = [
             _json_safe(value)
-            for value in series.dropna().head(5).tolist()
+            for value in profile_series.dropna().head(5).tolist()
         ]
+        missing_rate = float(profile_series.isna().mean()) if len(profile_series) else 0.0
+        missing_count = int(series.isna().sum()) if not profile_is_sampled else int(round(missing_rate * len(series)))
         columns.append(
             {
                 "name": str(name),
                 "dtype": str(series.dtype),
-                "missing_count": int(series.isna().sum()),
-                "missing_rate": float(series.isna().mean()) if len(series) else 0.0,
+                "missing_count": missing_count,
+                "missing_rate": missing_rate,
+                "profile_sampled": profile_is_sampled,
                 "sample_values": sample_values,
-                "evidence": _column_evidence(name=str(name), series=series),
+                "evidence": _column_evidence(
+                    name=str(name),
+                    series=profile_series,
+                    total_row_count=len(series),
+                    sampled=profile_is_sampled,
+                ),
             }
         )
     return {
@@ -335,10 +373,16 @@ def build_evidence_pack(
 def build_relation_evidence(tables: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
     relations: list[dict[str, Any]] = []
     table_items = list(tables.items())
+    relation_columns = {
+        table_name: _relation_candidate_columns(df)
+        for table_name, df in table_items
+    }
     for left_index, (left_name, left_df) in enumerate(table_items):
         for right_name, right_df in table_items[left_index + 1:]:
-            for left_column in left_df.columns:
-                for right_column in right_df.columns:
+            for left_column in relation_columns[left_name]:
+                for right_column in relation_columns[right_name]:
+                    if not _should_compare_relation_columns(str(left_column), str(right_column)):
+                        continue
                     relation = _relation_candidate(
                         left_table=left_name,
                         left_df=left_df,
@@ -358,6 +402,36 @@ def build_relation_evidence(tables: dict[str, pd.DataFrame]) -> list[dict[str, A
         ),
         reverse=True,
     )[:24]
+
+
+def _relation_candidate_columns(df: pd.DataFrame) -> list[str]:
+    scored: list[tuple[int, str]] = []
+    for column in df.columns:
+        name = str(column)
+        lowered = name.lower()
+        token_score = 1 if any(token in lowered for token in RELATION_KEY_TOKENS) else 0
+        dtype_score = 1 if (
+            pd.api.types.is_object_dtype(df[column])
+            or pd.api.types.is_integer_dtype(df[column])
+            or pd.api.types.is_string_dtype(df[column])
+        ) else 0
+        score = token_score * 2 + dtype_score
+        if score:
+            scored.append((score, name))
+    if not scored:
+        scored = [(1, str(column)) for column in list(df.columns)[:8]]
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [name for _, name in scored[:RELATION_COLUMN_LIMIT_PER_TABLE]]
+
+
+def _should_compare_relation_columns(left_column: str, right_column: str) -> bool:
+    left = left_column.lower()
+    right = right_column.lower()
+    if left == right:
+        return True
+    if any(token in left and token in right for token in RELATION_KEY_TOKENS):
+        return True
+    return difflib.SequenceMatcher(None, left, right).ratio() >= 0.45
 
 
 def _table_name(filename: str, fallback: str) -> str:
@@ -468,10 +542,24 @@ def _random_rows(df: pd.DataFrame, count: int) -> pd.DataFrame:
     return df.sample(n=min(count, len(df)), random_state=0).reset_index(drop=True)
 
 
-def _column_evidence(name: str, series: pd.Series) -> dict[str, Any]:
+def _profile_series(series: pd.Series) -> tuple[pd.Series, bool]:
+    if len(series) <= PROFILE_FULL_SCAN_ROW_LIMIT:
+        return series, False
+    sample = series.sample(n=min(PROFILE_SAMPLE_ROWS, len(series)), random_state=0)
+    return sample.reset_index(drop=True), True
+
+
+def _column_evidence(
+    name: str,
+    series: pd.Series,
+    *,
+    total_row_count: int | None = None,
+    sampled: bool = False,
+) -> dict[str, Any]:
     non_null = series.dropna()
     distinct_count = int(non_null.nunique(dropna=True))
-    row_count = int(len(series))
+    row_count = int(total_row_count if total_row_count is not None else len(series))
+    sample_row_count = int(len(series))
     uniqueness_ratio = float(distinct_count / len(non_null)) if len(non_null) else 0.0
     repeated_value_count = int(non_null.value_counts().loc[lambda values: values > 1].count()) if len(non_null) else 0
     with warnings.catch_warnings():
@@ -526,7 +614,10 @@ def _column_evidence(name: str, series: pd.Series) -> dict[str, Any]:
     return {
         "distinct_count": distinct_count,
         "uniqueness_ratio": round(uniqueness_ratio, 6),
-        "null_rate": float(series.isna().mean()) if row_count else 0.0,
+        "null_rate": float(series.isna().mean()) if sample_row_count else 0.0,
+        "profile_sampled": sampled,
+        "profile_sample_rows": sample_row_count,
+        "profile_total_rows": row_count,
         "min": min_value,
         "max": max_value,
         "numeric_nonzero_count": numeric_nonzero_count,
@@ -617,10 +708,11 @@ def _relation_candidate(
     }
 
 
-def _string_values(series: pd.Series, limit: int = 20000) -> list[str]:
-    values = series.dropna()
+def _string_values(series: pd.Series, limit: int = RELATION_VALUE_SAMPLE_LIMIT) -> list[str]:
+    values = series
     if len(values) > limit:
         values = values.sample(n=limit, random_state=0)
+    values = values.dropna()
     return [str(value) for value in values.tolist()]
 
 

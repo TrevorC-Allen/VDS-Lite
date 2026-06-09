@@ -243,6 +243,43 @@ def test_upload_multiple_csvs_builds_table_manifest_and_multi_file_context(tmp_p
     assert any("candidate" in note for note in customer_relation["evidence_notes"])
 
 
+def test_large_upload_profile_uses_sampling_and_key_limited_relations(tmp_path: Path) -> None:
+    pd = pytest.importorskip("pandas")
+    store = CsvDatasetStore(root_dir=tmp_path / "storage")
+    row_count = 6001
+    orders_path = tmp_path / "orders.csv"
+    customers_path = tmp_path / "customers.csv"
+    orders = pd.DataFrame(
+        {
+            "customer_id": [f"C-{index % 200:03d}" for index in range(row_count)],
+            "sku_id": [f"SKU-{index % 80:03d}" for index in range(row_count)],
+            "sales": [float(index % 100) for index in range(row_count)],
+            **{f"measure_{index}": [index] * row_count for index in range(30)},
+        }
+    )
+    customers = pd.DataFrame(
+        {
+            "customer_id": [f"C-{index:03d}" for index in range(200)],
+            "segment": ["A" if index % 2 else "B" for index in range(200)],
+        }
+    )
+    orders.to_csv(orders_path, index=False)
+    customers.to_csv(customers_path, index=False)
+
+    dataset = store.save_uploads([orders_path, customers_path], ["orders.csv", "customers.csv"])
+    orders_profile = dataset.profile["tables_by_name"]["orders"]
+    customer_id = orders_profile["columns_by_name"]["customer_id"]
+    relation_pairs = {
+        (item["left_column"], item["right_column"])
+        for item in dataset.profile["evidence_pack"]["relation_evidence"]
+    }
+
+    assert customer_id["profile_sampled"] is True
+    assert customer_id["evidence"]["profile_sample_rows"] == 5000
+    assert customer_id["evidence"]["profile_total_rows"] == row_count
+    assert ("customer_id", "customer_id") in relation_pairs
+
+
 def test_agent_sends_csv_context_to_llm_and_executes_generated_pandas(tmp_path: Path) -> None:
     store = CsvDatasetStore(root_dir=tmp_path / "storage")
     dataset = store.save_upload(write_csv(tmp_path), original_filename="sales.csv")
