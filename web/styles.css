@@ -164,15 +164,8 @@ button {
 }
 
 .nav-group[data-section="projects"] {
-  height: 304px;
-  max-height: 304px;
-  min-height: 86px;
-  overflow: hidden;
-}
-
-.nav-group[data-section="projects"].collapsed {
-  height: auto;
-  min-height: 0;
+  flex: 0 0 auto;
+  overflow: visible;
 }
 
 .dataset-sidebar {
@@ -237,7 +230,7 @@ button {
   gap: 3px;
 }
 
-.project-list-scroll,
+.project-list-expanded,
 .history-list,
 .sidebar-profile-list {
   flex: 1 1 auto;
@@ -248,8 +241,10 @@ button {
   scrollbar-width: thin;
 }
 
-.project-list-scroll {
-  max-height: 226px;
+.project-list-expanded {
+  display: grid;
+  gap: 3px;
+  overflow: visible;
 }
 
 .nav-row {
@@ -270,6 +265,87 @@ button {
 
 .nav-row.pinned .nav-item {
   font-weight: 600;
+}
+
+.project-block {
+  display: grid;
+  gap: 1px;
+}
+
+.project-child-list {
+  display: grid;
+  gap: 1px;
+  padding: 3px 0 5px 26px;
+}
+
+.project-child-row {
+  display: grid;
+  min-height: 32px;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  border-radius: 8px;
+}
+
+.project-child-row.active {
+  background: rgba(47, 111, 237, 0.1);
+}
+
+.project-child-row.active .nav-item {
+  color: #174ea6;
+  font-weight: 600;
+}
+
+.project-child-row .nav-item {
+  min-height: 32px;
+  padding-left: 0;
+  color: #111827;
+}
+
+.project-child-row .row-menu {
+  width: 26px;
+}
+
+.project-folder {
+  position: relative;
+  width: 15px;
+  height: 11px;
+  flex: 0 0 auto;
+  margin-right: 7px;
+  border: 1.5px solid #111827;
+  border-radius: 2px;
+}
+
+.project-folder::before {
+  content: "";
+  position: absolute;
+  top: -4px;
+  left: 1px;
+  width: 7px;
+  height: 4px;
+  border: 1.5px solid #111827;
+  border-bottom: 0;
+  border-radius: 2px 2px 0 0;
+  background: #f7f8fc;
+}
+
+.nav-show-more {
+  min-height: 34px;
+  border-radius: 10px;
+  padding: 0 10px;
+  color: #6b7280;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nav-show-more:hover,
+.project-chat-more {
+  background: rgba(15, 23, 42, 0.035);
+}
+
+.project-chat-more {
+  margin-top: 2px;
 }
 
 .nav-item {
@@ -307,6 +383,7 @@ button {
 }
 
 .nav-row:hover .row-menu,
+.project-child-row:hover .row-menu,
 .project-card:hover .row-menu,
 .row-menu:focus-visible {
   opacity: 1;

@@ -4,7 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>VDS Lite Agent</title>
-    <link rel="stylesheet" href="/web/styles.css?v=20260609-scrollbottom2" />
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/web/styles.css?v=20260609-project-inline" />
   </head>
   <body>
     <div class="app-shell">
@@ -27,16 +28,15 @@
             <span>项目</span>
           </button>
           <div id="projects-section-body" class="nav-section-body">
-            <div id="project-list" class="nav-list project-list-scroll">
+            <div id="project-list" class="nav-list project-list-expanded">
               <button id="new-project-button" class="nav-item" type="button">新项目</button>
             </div>
-            <div class="nav-subtitle">project-only memory</div>
           </div>
         </section>
 
         <section class="nav-group grow sidebar-panel" data-section="history">
           <button id="history-collapse-button" class="sidebar-header-button" type="button" aria-expanded="true" aria-controls="history-section-body" data-collapse-target="history">
-            <span>历史 Chat</span>
+            <span>聊天</span>
           </button>
           <div id="history-section-body" class="nav-section-body">
             <div id="conversation-list" class="nav-list history-list"></div>
@@ -343,6 +343,6 @@
         <div id="search-results" class="search-results"></div>
       </div>
     </section>
-    <script src="/web/app.js?v=20260609-scrollbottom2"></script>
+    <script src="/web/app.js?v=20260609-project-inline"></script>
   </body>
 </html>

@@ -1,4 +1,6 @@
 const SIDEBAR_PANEL_COLLAPSED_PREFIX = "vds-lite-sidebar-panel-collapsed";
+const PROJECT_VISIBLE_LIMIT = 5;
+const PROJECT_CHAT_VISIBLE_LIMIT = 5;
 const THINKING_PHASES = [
   {
     key: "context",
@@ -44,6 +46,9 @@ const state = {
   conversationId: "",
   profile: null,
   projects: [],
+  projectConversations: {},
+  projectListExpanded: false,
+  projectChatExpanded: {},
   conversations: [],
   projectDetail: null,
   projectTab: "chats",
@@ -1073,11 +1078,33 @@ async function loadProjects() {
   try {
     const payload = await getJson("/api/chat/projects");
     state.projects = payload.projects || [];
+    await loadVisibleProjectConversations();
     renderProjectList();
     if (!state.projectId) await loadConversations("");
   } catch (error) {
     el.composerHint.textContent = `项目加载失败：${error.message}`;
   }
+}
+
+async function loadVisibleProjectConversations() {
+  const visibleProjects = getVisibleProjectsForSidebar();
+  await Promise.all(visibleProjects.map(async (project) => {
+    try {
+      const payload = await getJson(`/api/chat/projects/${encodeURIComponent(project.project_id)}/conversations`);
+      state.projectConversations[project.project_id] = payload.conversations || [];
+    } catch (error) {
+      state.projectConversations[project.project_id] = [];
+    }
+  }));
+}
+
+function getVisibleProjectsForSidebar() {
+  const visible = state.projectListExpanded ? [...state.projects] : state.projects.slice(0, PROJECT_VISIBLE_LIMIT);
+  if (state.projectId && !visible.some((project) => project.project_id === state.projectId)) {
+    const selected = state.projects.find((project) => project.project_id === state.projectId);
+    if (selected) visible.push(selected);
+  }
+  return visible;
 }
 
 async function selectProject(projectId) {
@@ -1135,7 +1162,9 @@ async function loadConversations(projectId) {
       : "/api/chat/conversations";
     const payload = await getJson(url);
     state.conversations = payload.conversations || [];
+    if (projectId) state.projectConversations[projectId] = payload.conversations || [];
     renderConversationList();
+    renderProjectList();
   } catch (error) {
     el.composerHint.textContent = `历史对话加载失败：${error.message}`;
   }
@@ -1147,8 +1176,10 @@ async function loadProjectDetail(projectId) {
     const payload = await getJson(`/api/chat/projects/${encodeURIComponent(projectId)}`);
     state.projectDetail = payload.project || null;
     state.conversations = payload.conversations || state.conversations;
+    state.projectConversations[projectId] = payload.conversations || [];
     renderProjectHome();
     renderConversationList();
+    renderProjectList();
   } catch (error) {
     el.composerHint.textContent = `项目详情加载失败：${error.message}`;
   }
@@ -1371,20 +1402,15 @@ async function deleteJson(url) {
 }
 
 function renderProjectList() {
-  const items = state.projects
-    .map((project) => `
-      <div class="nav-row ${project.project_id === state.projectId ? "active" : ""} ${project.pinned ? "pinned" : ""}" data-project-id="${escapeHtml(project.project_id)}">
-        <button class="nav-item project-open" type="button">
-          ${project.pinned ? '<span class="pin-dot">◆</span>' : ""}
-          <span>${escapeHtml(project.name || "未命名项目")}</span>
-        </button>
-        <button class="row-menu" type="button" title="项目选项" aria-label="项目选项">•••</button>
-      </div>
-    `)
+  const visibleProjects = getVisibleProjectsForSidebar();
+  const items = visibleProjects
+    .map((project) => renderSidebarProject(project))
     .join("");
+  const hasMoreProjects = !state.projectListExpanded && state.projects.length > visibleProjects.length;
   el.projectList.innerHTML = `
     <button id="new-project-button" class="nav-item new-item" type="button">新项目</button>
     ${items}
+    ${hasMoreProjects ? '<button class="nav-show-more" type="button" data-project-list-more>查看更多</button>' : ""}
   `;
   el.projectList.querySelector("#new-project-button").addEventListener("click", createProject);
   for (const row of el.projectList.querySelectorAll("[data-project-id]")) {
@@ -1394,6 +1420,61 @@ function renderProjectList() {
       openProjectMenu(row.dataset.projectId, event.currentTarget);
     });
   }
+  for (const row of el.projectList.querySelectorAll("[data-project-conversation-id]")) {
+    row.querySelector(".project-child-open").addEventListener("click", () => openConversation(row.dataset.projectConversationId));
+    row.querySelector(".row-menu").addEventListener("click", (event) => {
+      event.stopPropagation();
+      openConversationMenu(row.dataset.projectConversationId, event.currentTarget);
+    });
+  }
+  for (const button of el.projectList.querySelectorAll("[data-project-chat-more]")) {
+    button.addEventListener("click", () => {
+      state.projectChatExpanded[button.dataset.projectChatMore] = true;
+      renderProjectList();
+    });
+  }
+  const projectMore = el.projectList.querySelector("[data-project-list-more]");
+  if (projectMore) {
+    projectMore.addEventListener("click", async () => {
+      state.projectListExpanded = true;
+      await loadVisibleProjectConversations();
+      renderProjectList();
+    });
+  }
+}
+
+function renderSidebarProject(project) {
+  const projectId = String(project.project_id || "");
+  const conversations = state.projectConversations[projectId] || [];
+  const chatLimit = state.projectChatExpanded[projectId] ? conversations.length : PROJECT_CHAT_VISIBLE_LIMIT;
+  const visibleConversations = conversations.slice(0, chatLimit);
+  const moreCount = Math.max(0, conversations.length - visibleConversations.length);
+  return `
+    <div class="project-block ${project.project_id === state.projectId ? "active" : ""}">
+      <div class="nav-row ${project.project_id === state.projectId ? "active" : ""} ${project.pinned ? "pinned" : ""}" data-project-id="${escapeHtml(projectId)}">
+        <button class="nav-item project-open" type="button">
+          <span class="project-folder" aria-hidden="true"></span>
+          <span>${escapeHtml(project.name || "未命名项目")}</span>
+        </button>
+        <button class="row-menu" type="button" title="项目选项" aria-label="项目选项">•••</button>
+      </div>
+      <div class="project-child-list">
+        ${visibleConversations.map((conversation) => renderSidebarProjectConversation(conversation)).join("")}
+        ${moreCount ? `<button class="nav-show-more project-chat-more" type="button" data-project-chat-more="${escapeHtml(projectId)}">显示更多</button>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function renderSidebarProjectConversation(conversation) {
+  return `
+    <div class="project-child-row ${conversation.conversation_id === state.conversationId ? "active" : ""} ${conversation.pinned ? "pinned" : ""}" data-project-conversation-id="${escapeHtml(conversation.conversation_id)}">
+      <button class="nav-item project-child-open" type="button">
+        <span>${escapeHtml(conversation.title || "新对话")}</span>
+      </button>
+      <button class="row-menu" type="button" title="对话选项" aria-label="对话选项">•••</button>
+    </div>
+  `;
 }
 
 function sortPinnedItems(a, b) {
@@ -1526,7 +1607,7 @@ function openProjectMenu(projectId, anchor) {
 }
 
 function openConversationMenu(conversationId, anchor) {
-  const conversation = state.conversations.find((item) => item.conversation_id === conversationId) || {};
+  const conversation = findConversationById(conversationId) || {};
   const moveItems = state.projects
     .filter((project) => project.project_id && project.project_id !== conversation.project_id)
     .slice(0, 8)
@@ -1540,6 +1621,16 @@ function openConversationMenu(conversationId, anchor) {
     ...moveItems,
     { label: "删除", danger: true, action: () => deleteConversation(conversationId) },
   ]);
+}
+
+function findConversationById(conversationId) {
+  const fromOrdinaryChats = state.conversations.find((item) => item.conversation_id === conversationId);
+  if (fromOrdinaryChats) return fromOrdinaryChats;
+  for (const conversations of Object.values(state.projectConversations)) {
+    const match = conversations.find((item) => item.conversation_id === conversationId);
+    if (match) return match;
+  }
+  return null;
 }
 
 function showContextMenu(anchor, items) {
@@ -1601,18 +1692,22 @@ async function deleteProject(projectId) {
 }
 
 async function renameConversation(conversationId) {
-  const conversation = state.conversations.find((item) => item.conversation_id === conversationId);
+  const conversation = findConversationById(conversationId);
   const title = window.prompt("对话名称", conversation?.title || "新对话");
   if (title === null || !title.trim()) return;
   await patchJson(`/api/chat/conversations/${encodeURIComponent(conversationId)}`, { title: title.trim() });
   await loadConversations(state.projectId);
   await loadProjectDetail(state.projectId);
+  await loadVisibleProjectConversations();
+  renderProjectList();
 }
 
 async function toggleConversationPinned(conversationId, pinned) {
   await patchJson(`/api/chat/conversations/${encodeURIComponent(conversationId)}`, { pinned });
   await loadConversations(state.projectId);
   await loadProjectDetail(state.projectId);
+  await loadVisibleProjectConversations();
+  renderProjectList();
 }
 
 async function moveConversationToProject(conversationId, projectId) {
@@ -1635,6 +1730,8 @@ async function deleteConversation(conversationId) {
   }
   await loadConversations(state.projectId);
   await loadProjectDetail(state.projectId);
+  await loadVisibleProjectConversations();
+  renderProjectList();
 }
 
 function clearConversation(options = {}) {

@@ -64,6 +64,10 @@ def test_operations_pages_have_frontend_state_and_renderers() -> None:
         "updateScrollBottomButton",
         "startUnprojectedConversation",
         "moveConversationToProject",
+        "loadVisibleProjectConversations",
+        "renderSidebarProject",
+        "projectListExpanded",
+        "projectChatExpanded",
         "/api/chat/conversations",
     ]:
         assert symbol in app_js
@@ -84,6 +88,10 @@ def test_operations_pages_have_frontend_state_and_renderers() -> None:
     assert "await selectProject(state.projects[0].project_id)" not in app_js
     assert 'el.newChatButton.addEventListener("click", startUnprojectedConversation)' in app_js
     assert "project_id: state.projectId" in app_js
+    assert "PROJECT_VISIBLE_LIMIT" in app_js
+    assert "PROJECT_CHAT_VISIBLE_LIMIT" in app_js
+    assert "data-project-list-more" in app_js
+    assert "data-project-chat-more" in app_js
 
 
 def test_operations_pages_have_dedicated_styles() -> None:
@@ -103,6 +111,10 @@ def test_operations_pages_have_dedicated_styles() -> None:
         ".composer-file-icon",
         ".composer-file-progress",
         ".scroll-bottom-button",
+        ".project-list-expanded",
+        ".project-child-list",
+        ".project-child-row",
+        ".nav-show-more",
         ".workspace::-webkit-scrollbar",
         "@keyframes fileUploadSpinner",
     ]:
@@ -118,8 +130,8 @@ def test_operations_pages_have_dedicated_styles() -> None:
     assert "font-size: 14px;" in css
     assert "font-weight: 500;" in css
     assert "grid-template-columns: 260px minmax(0, 1fr);" in css
-    assert "height: 304px;" in css
-    assert "max-height: 226px;" in css
+    assert "height: 304px;" not in css
+    assert "max-height: 226px;" not in css
     assert "min-height: 34px;" in css
     composer_css = css.split(".composer-shell {", 1)[1].split("}", 1)[0]
     assert "position: fixed;" in composer_css
