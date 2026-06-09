@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -123,6 +124,62 @@ def test_project_store_pins_projects_first(tmp_path: Path) -> None:
     assert listed[1]["project_id"] == first["project_id"]
     assert search_results[0]["project_id"] == pinned["project_id"]
     assert search_results[0]["pinned"] is True
+
+
+def test_unprojected_conversation_stays_outside_projects_until_moved(tmp_path: Path) -> None:
+    project_store = ProjectStore(path=tmp_path / "chat_state.json")
+
+    conversation = project_store.create_conversation(title="普通聊天", dataset_id="dataset_1")
+
+    assert project_store.list_projects() == []
+    assert conversation["project_id"] == ""
+    assert project_store.list_conversations()[0]["conversation_id"] == conversation["conversation_id"]
+
+    project = project_store.create_project("手动项目")
+    moved = project_store.update_conversation(conversation["conversation_id"], project_id=project["project_id"])
+
+    assert moved["project_id"] == project["project_id"]
+    assert project_store.list_conversations() == []
+    assert project_store.list_conversations(project["project_id"])[0]["conversation_id"] == conversation["conversation_id"]
+
+
+def test_legacy_default_project_is_migrated_to_unprojected_history(tmp_path: Path) -> None:
+    state_path = tmp_path / "chat_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    "proj_default": {
+                        "project_id": "proj_default",
+                        "name": "默认项目",
+                        "pinned": False,
+                        "memories": [],
+                    }
+                },
+                "conversations": {
+                    "conv_legacy": {
+                        "conversation_id": "conv_legacy",
+                        "project_id": "proj_default",
+                        "title": "旧普通聊天",
+                        "dataset_id": "dataset_1",
+                        "turns": [],
+                        "created_at": "2026-06-09T00:00:00+00:00",
+                        "updated_at": "2026-06-09T00:00:00+00:00",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    migrated_store = ProjectStore(path=state_path)
+
+    assert migrated_store.list_projects() == []
+    migrated = migrated_store.get_conversation("conv_legacy")
+    assert migrated is not None
+    assert migrated["project_id"] == ""
+    assert migrated_store.list_conversations()[0]["conversation_id"] == "conv_legacy"
 
 
 def test_evidence_pack_adds_column_statistics_without_business_conclusions(tmp_path: Path) -> None:
@@ -1448,8 +1505,10 @@ def test_backend_executes_llm_chosen_generated_code_examples(
 
 def test_ask_persists_run_debug_record_for_lookup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = CsvDatasetStore(root_dir=tmp_path / "storage")
+    project_store = ProjectStore(path=tmp_path / "storage" / "chat_state.json")
     dataset = store.save_upload(write_csv(tmp_path), original_filename="sales.csv")
     monkeypatch.setattr(chat_api, "store", store)
+    monkeypatch.setattr(chat_api, "project_store", project_store)
     monkeypatch.setattr(
         chat_api,
         "create_llm_client",
@@ -1471,6 +1530,9 @@ def test_ask_persists_run_debug_record_for_lookup(tmp_path: Path, monkeypatch: p
     assert lookup["status"] == "completed"
     assert lookup["payload"]["direct_answer"] == "Total sales is 648.0"
     assert "pandas_code" in lookup["payload"]
+    assert response["project_id"] == ""
+    assert project_store.list_projects() == []
+    assert project_store.list_conversations()[0]["conversation_id"] == response["conversation_id"]
 
 
 def test_project_conversation_inherits_project_dataset_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

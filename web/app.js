@@ -177,8 +177,8 @@ el.profileDrawerBackdrop.addEventListener("click", closeDrawer);
 el.thinkingDrawerClose.addEventListener("click", closeThinkingDrawer);
 el.thinkingDrawerBackdrop.addEventListener("click", closeThinkingDrawer);
 el.newProjectButton.addEventListener("click", createProject);
-el.newChatButton.addEventListener("click", createConversation);
-el.projectHomeNewChat.addEventListener("click", createConversation);
+el.newChatButton.addEventListener("click", startUnprojectedConversation);
+el.projectHomeNewChat.addEventListener("click", () => createConversation({ projectId: state.projectId }));
 el.projectTabChats.addEventListener("click", () => setProjectTab("chats"));
 el.projectTabSources.addEventListener("click", () => setProjectTab("sources"));
 el.projectSourceInput.addEventListener("change", () => handleProjectSourceSelection());
@@ -206,7 +206,7 @@ el.searchCloseButton.addEventListener("click", closeSearchModal);
 el.searchModalBackdrop.addEventListener("click", closeSearchModal);
 el.searchNewChat.addEventListener("click", async () => {
   closeSearchModal();
-  await createConversation();
+  await startUnprojectedConversation();
 });
 el.searchInput.addEventListener("input", () => scheduleSearch(el.searchInput.value));
 document.addEventListener("click", (event) => {
@@ -1074,9 +1074,7 @@ async function loadProjects() {
     const payload = await getJson("/api/chat/projects");
     state.projects = payload.projects || [];
     renderProjectList();
-    if (!state.projectId && state.projects.length) {
-      await selectProject(state.projects[0].project_id);
-    }
+    if (!state.projectId) await loadConversations("");
   } catch (error) {
     el.composerHint.textContent = `项目加载失败：${error.message}`;
   }
@@ -1108,11 +1106,17 @@ async function loadProjectDataset(project) {
     updateAskState();
     return;
   }
+  await loadDatasetContext(project.current_dataset_id, "project");
+}
+
+async function loadDatasetContext(datasetId, scope = "chat") {
   try {
-    const payload = await getJson(`/api/chat/sessions/${encodeURIComponent(project.current_dataset_id)}`);
+    const payload = await getJson(`/api/chat/sessions/${encodeURIComponent(datasetId)}`);
     state.datasetId = payload.dataset_id;
     state.profile = payload.profile;
-    state.contextStatus = `项目数据已就绪：${payload.original_filename || payload.dataset_id}`;
+    state.contextStatus = scope === "project"
+      ? `项目数据已就绪：${payload.original_filename || payload.dataset_id}`
+      : `对话数据已就绪：${payload.original_filename || payload.dataset_id}`;
     el.datasetChip.textContent = formatDatasetKind(payload.profile.dataset_kind);
     el.uploadStatus.textContent = state.contextStatus;
     state.selectedFiles = [];
@@ -1120,14 +1124,16 @@ async function loadProjectDataset(project) {
     renderProfile(payload.profile);
     updateAskState();
   } catch (error) {
-    el.composerHint.textContent = `项目数据加载失败：${error.message}`;
+    el.composerHint.textContent = `数据加载失败：${error.message}`;
   }
 }
 
 async function loadConversations(projectId) {
-  if (!projectId) return;
   try {
-    const payload = await getJson(`/api/chat/projects/${encodeURIComponent(projectId)}/conversations`);
+    const url = projectId
+      ? `/api/chat/projects/${encodeURIComponent(projectId)}/conversations`
+      : "/api/chat/conversations";
+    const payload = await getJson(url);
     state.conversations = payload.conversations || [];
     renderConversationList();
   } catch (error) {
@@ -1252,17 +1258,34 @@ async function createProject() {
   const payload = await postJson("/api/chat/projects", { name: name.trim() || null });
   state.projects.unshift(payload.project);
   renderProjectList();
-  state.conversationId = payload.conversation.conversation_id;
   await selectProject(payload.project.project_id);
+}
+
+async function startUnprojectedConversation() {
+  state.projectId = "";
+  state.conversationId = "";
+  state.projectDetail = null;
+  state.datasetId = "";
+  state.profile = null;
+  state.contextStatus = "等待选择文件。";
+  el.datasetChip.textContent = "未上传数据";
+  el.uploadStatus.textContent = state.contextStatus;
+  renderProjectList();
+  await loadConversations("");
+  renderEmptyProfile();
   clearConversation();
 }
 
-async function createConversation() {
-  if (!state.projectId) return;
+async function createConversation({ projectId = state.projectId } = {}) {
+  if (!projectId) {
+    await startUnprojectedConversation();
+    return;
+  }
   const payload = await postJson("/api/chat/conversations", {
-    project_id: state.projectId,
+    project_id: projectId,
     title: "新对话",
   });
+  state.projectId = projectId;
   state.conversationId = payload.conversation.conversation_id;
   state.conversations.unshift(payload.conversation);
   clearConversation();
@@ -1277,14 +1300,25 @@ async function openConversation(conversationId) {
   if (payload.project_id && payload.project_id !== state.projectId) {
     state.projectId = payload.project_id;
     renderProjectList();
+  } else if (!payload.project_id) {
+    state.projectId = "";
+    state.projectDetail = null;
+    renderProjectList();
   }
   if (payload.dataset_id && payload.dataset_available !== false) {
     state.datasetId = payload.dataset_id;
-    await loadProjectDataset({ current_dataset_id: payload.dataset_id });
+    await loadDatasetContext(payload.dataset_id, payload.project_id ? "project" : "chat");
   } else if (payload.dataset_id && payload.dataset_available === false) {
     state.datasetId = "";
     state.profile = null;
     state.contextStatus = "这条历史对话的数据文件已不可用，请重新上传。";
+    el.datasetChip.textContent = "未上传数据";
+    el.uploadStatus.textContent = state.contextStatus;
+    renderEmptyProfile();
+  } else {
+    state.datasetId = "";
+    state.profile = null;
+    state.contextStatus = payload.project_id ? "当前项目还没有上传数据。" : "等待选择文件。";
     el.datasetChip.textContent = "未上传数据";
     el.uploadStatus.textContent = state.contextStatus;
     renderEmptyProfile();
@@ -1493,9 +1527,17 @@ function openProjectMenu(projectId, anchor) {
 
 function openConversationMenu(conversationId, anchor) {
   const conversation = state.conversations.find((item) => item.conversation_id === conversationId) || {};
+  const moveItems = state.projects
+    .filter((project) => project.project_id && project.project_id !== conversation.project_id)
+    .slice(0, 8)
+    .map((project) => ({
+      label: `移至：${project.name || "未命名项目"}`,
+      action: () => moveConversationToProject(conversationId, project.project_id),
+    }));
   showContextMenu(anchor, [
     { label: conversation.pinned ? "取消置顶" : "置顶聊天", action: () => toggleConversationPinned(conversationId, !conversation.pinned) },
     { label: "重命名", action: () => renameConversation(conversationId) },
+    ...moveItems,
     { label: "删除", danger: true, action: () => deleteConversation(conversationId) },
   ]);
 }
@@ -1571,6 +1613,17 @@ async function toggleConversationPinned(conversationId, pinned) {
   await patchJson(`/api/chat/conversations/${encodeURIComponent(conversationId)}`, { pinned });
   await loadConversations(state.projectId);
   await loadProjectDetail(state.projectId);
+}
+
+async function moveConversationToProject(conversationId, projectId) {
+  const payload = await patchJson(`/api/chat/conversations/${encodeURIComponent(conversationId)}`, { project_id: projectId });
+  state.projectId = projectId;
+  state.projectDetail = null;
+  state.conversationId = payload.conversation?.conversation_id || conversationId;
+  renderProjectList();
+  await loadConversations(projectId);
+  await loadProjectDetail(projectId);
+  await openConversation(state.conversationId);
 }
 
 async function deleteConversation(conversationId) {

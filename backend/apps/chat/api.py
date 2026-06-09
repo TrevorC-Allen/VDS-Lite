@@ -30,7 +30,7 @@ class UpdateProjectPayload(BaseModel):
 
 
 class CreateConversationPayload(BaseModel):
-    project_id: str
+    project_id: str | None = None
     title: str | None = None
 
 
@@ -60,13 +60,14 @@ async def upload(file: UploadFile = File(...), project_id: str | None = Form(Non
             raise HTTPException(status_code=400, detail=str(error)) from error
         except ImportError as error:
             raise HTTPException(status_code=500, detail=str(error)) from error
-        project = project_store.ensure_default_project() if not project_id else project_store.get_project(project_id)
-        if project is None:
-            project = project_store.create_project("默认项目")
-        project_store.update_project_dataset(project["project_id"], dataset.dataset_id, dataset.profile)
+        project = project_store.get_project(project_id) if project_id else None
+        if project_id and project is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        if project is not None:
+            project_store.update_project_dataset(project["project_id"], dataset.dataset_id, dataset.profile)
         return {
             "dataset_id": dataset.dataset_id,
-            "project_id": project["project_id"],
+            "project_id": project["project_id"] if project else "",
             "profile": dataset.profile,
             "csv_text": dataset.csv_text,
         }
@@ -90,13 +91,14 @@ async def upload_batch(files: list[UploadFile] = File(...), project_id: str | No
             raise HTTPException(status_code=400, detail=str(error)) from error
         except ImportError as error:
             raise HTTPException(status_code=500, detail=str(error)) from error
-        project = project_store.ensure_default_project() if not project_id else project_store.get_project(project_id)
-        if project is None:
-            project = project_store.create_project("默认项目")
-        project_store.update_project_dataset(project["project_id"], dataset.dataset_id, dataset.profile)
+        project = project_store.get_project(project_id) if project_id else None
+        if project_id and project is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        if project is not None:
+            project_store.update_project_dataset(project["project_id"], dataset.dataset_id, dataset.profile)
         return {
             "dataset_id": dataset.dataset_id,
-            "project_id": project["project_id"],
+            "project_id": project["project_id"] if project else "",
             "profile": dataset.profile,
             "csv_text": dataset.csv_text,
         }
@@ -107,15 +109,19 @@ async def upload_batch(files: list[UploadFile] = File(...), project_id: str | No
 
 @router.post("/ask")
 def ask(payload: AskPayload) -> dict[str, Any]:
-    project = project_store.get_project(payload.project_id) if payload.project_id else project_store.ensure_default_project()
     conversation = project_store.get_conversation(payload.conversation_id) if payload.conversation_id else None
-    dataset_id = payload.dataset_id or (conversation or {}).get("dataset_id") or project.get("current_dataset_id")
+    project_id = payload.project_id or (conversation or {}).get("project_id") or ""
+    project = project_store.get_project(project_id) if project_id else None
+    if project_id and project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    dataset_id = payload.dataset_id or (conversation or {}).get("dataset_id") or (project or {}).get("current_dataset_id")
     if not dataset_id:
-        raise HTTPException(status_code=400, detail="No dataset is available for this project. Upload a file first.")
+        detail = "No dataset is available for this project. Upload a file first." if project_id else "No dataset is available. Upload a file first."
+        raise HTTPException(status_code=400, detail=detail)
     dataset = store.load(dataset_id)
     if conversation is None:
         conversation = project_store.create_conversation(
-            project_id=project["project_id"],
+            project_id=project_id,
             title=payload.question[:40],
             dataset_id=dataset_id,
         )
@@ -152,7 +158,7 @@ def ask(payload: AskPayload) -> dict[str, Any]:
             ],
         }
     response["conversation_id"] = conversation_id
-    response["project_id"] = project["project_id"]
+    response["project_id"] = project_id
     response["dataset_id"] = dataset_id
     turn_record = {
         "run_id": response["run_id"],
@@ -172,7 +178,7 @@ def ask(payload: AskPayload) -> dict[str, Any]:
     run_records[response["run_id"]] = {
         "run_id": response["run_id"],
         "dataset_id": dataset_id,
-        "project_id": project["project_id"],
+        "project_id": project_id,
         "conversation_id": conversation_id,
         "question": payload.question,
         "status": "failed" if response.get("execution_error") else "completed",
@@ -183,21 +189,18 @@ def ask(payload: AskPayload) -> dict[str, Any]:
 
 @router.get("/projects")
 def projects() -> dict[str, Any]:
-    project_store.ensure_default_project()
     return {"projects": project_store.list_projects()}
 
 
 @router.get("/search")
 def search(q: str = Query("", max_length=200), limit: int = Query(40, ge=1, le=100)) -> dict[str, Any]:
-    project_store.ensure_default_project()
     return {"query": q, "results": project_store.search(q, limit=limit)}
 
 
 @router.post("/projects")
 def create_project(payload: CreateProjectPayload) -> dict[str, Any]:
     project = project_store.create_project(payload.name)
-    conversation = project_store.create_conversation(project_id=project["project_id"], title="新对话")
-    return {"project": project, "conversation": conversation}
+    return {"project": project}
 
 
 @router.get("/projects/{project_id}")
@@ -232,15 +235,19 @@ def delete_project(project_id: str) -> dict[str, Any]:
 
 @router.post("/conversations")
 def create_conversation(payload: CreateConversationPayload) -> dict[str, Any]:
-    project = project_store.get_project(payload.project_id)
-    if project is None:
+    project_id = payload.project_id or ""
+    project = project_store.get_project(project_id) if project_id else None
+    if project_id and project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
-    conversation = project_store.create_conversation(
-        project_id=payload.project_id,
-        title=payload.title,
-        dataset_id=project.get("current_dataset_id") or "",
-    )
+    conversation = project_store.create_conversation(project_id=project_id, title=payload.title)
     return {"conversation": conversation}
+
+
+@router.get("/conversations")
+def conversations(project_id: str | None = Query(None)) -> dict[str, Any]:
+    if project_id and project_store.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {"conversations": project_store.list_conversations(project_id or "")}
 
 
 @router.get("/projects/{project_id}/conversations")
@@ -274,6 +281,13 @@ def update_conversation(conversation_id: str, payload: UpdateConversationPayload
             pinned=payload.pinned,
             project_id=payload.project_id,
         )
+        if payload.project_id and conversation.get("dataset_id"):
+            try:
+                dataset = store.load(str(conversation["dataset_id"]))
+                project_store.update_project_dataset(payload.project_id, dataset.dataset_id, dataset.profile)
+                conversation = project_store.get_conversation(conversation_id) or conversation
+            except KeyError:
+                pass
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     return {"conversation": conversation}

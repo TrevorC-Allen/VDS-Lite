@@ -62,6 +62,9 @@ def test_operations_pages_have_frontend_state_and_renderers() -> None:
         "sortPinnedItems",
         "scrollConversationToBottom",
         "updateScrollBottomButton",
+        "startUnprojectedConversation",
+        "moveConversationToProject",
+        "/api/chat/conversations",
     ]:
         assert symbol in app_js
 
@@ -78,6 +81,9 @@ def test_operations_pages_have_frontend_state_and_renderers() -> None:
     assert "{ pinned }" in app_js
     assert "el.workspace.scrollTo" in app_js
     assert 'el.workspace.addEventListener("scroll", updateScrollBottomButton)' in app_js
+    assert "await selectProject(state.projects[0].project_id)" not in app_js
+    assert 'el.newChatButton.addEventListener("click", startUnprojectedConversation)' in app_js
+    assert "project_id: state.projectId" in app_js
 
 
 def test_operations_pages_have_dedicated_styles() -> None:

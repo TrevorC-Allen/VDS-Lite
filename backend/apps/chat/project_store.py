@@ -63,7 +63,7 @@ class ProjectStore:
                     "project_id": conversation.get("project_id"),
                     "conversation_id": conversation.get("conversation_id"),
                     "title": title,
-                    "subtitle": str(project.get("name") or "项目"),
+                    "subtitle": str(project.get("name") or "普通聊天"),
                     "snippet": snippet,
                     "updated_at": conversation.get("updated_at") or conversation.get("created_at") or "",
                     "pinned": bool(conversation.get("pinned")),
@@ -100,7 +100,9 @@ class ProjectStore:
 
     def update_project_dataset(self, project_id: str, dataset_id: str, profile: dict[str, Any]) -> dict[str, Any]:
         state = self._load()
-        project = state["projects"].setdefault(project_id, self._new_project("默认项目", project_id=project_id))
+        project = state["projects"].get(project_id)
+        if project is None:
+            raise KeyError(f"project not found: {project_id}")
         project["current_dataset_id"] = dataset_id
         project["dataset_profile_summary"] = _profile_summary(profile)
         sources = project.setdefault("sources", [])
@@ -145,12 +147,13 @@ class ProjectStore:
         self._save(state)
         return {"project_id": project_id, "deleted": True}
 
-    def list_conversations(self, project_id: str) -> list[dict[str, Any]]:
+    def list_conversations(self, project_id: str | None = None) -> list[dict[str, Any]]:
         state = self._load()
+        normalized_project_id = str(project_id or "")
         conversations = [
             conversation
             for conversation in state["conversations"].values()
-            if conversation.get("project_id") == project_id
+            if str(conversation.get("project_id") or "") == normalized_project_id
         ]
         return sorted(
             conversations,
@@ -165,16 +168,21 @@ class ProjectStore:
     def create_conversation(
         self,
         *,
-        project_id: str,
+        project_id: str | None = None,
         title: str | None = None,
         dataset_id: str | None = None,
     ) -> dict[str, Any]:
         state = self._load()
-        project = state["projects"].setdefault(project_id, self._new_project("默认项目", project_id=project_id))
+        normalized_project_id = str(project_id or "")
+        project = None
+        if normalized_project_id:
+            project = state["projects"].get(normalized_project_id)
+            if project is None:
+                raise KeyError(f"project not found: {normalized_project_id}")
         conversation = self._new_conversation(
-            project_id=project_id,
+            project_id=normalized_project_id,
             title=title or "新对话",
-            dataset_id=dataset_id or project.get("current_dataset_id") or "",
+            dataset_id=dataset_id or (project or {}).get("current_dataset_id") or "",
         )
         state["conversations"][conversation["conversation_id"]] = conversation
         self._save(state)
@@ -239,6 +247,8 @@ class ProjectStore:
             state = {"projects": {}, "conversations": {}}
         state.setdefault("projects", {})
         state.setdefault("conversations", {})
+        if self._migrate_legacy_default_project(state):
+            self._save(state)
         return state
 
     def _save(self, state: dict[str, Any]) -> None:
@@ -272,6 +282,23 @@ class ProjectStore:
             "created_at": created_at,
             "updated_at": created_at,
         }
+
+    def _migrate_legacy_default_project(self, state: dict[str, Any]) -> bool:
+        changed = False
+        projects = state.get("projects") or {}
+        conversations = state.get("conversations") or {}
+        for project_id, project in list(projects.items()):
+            if str(project.get("name") or "") != "默认项目":
+                continue
+            if project.get("pinned") or project.get("memories"):
+                continue
+            for conversation in conversations.values():
+                if str(conversation.get("project_id") or "") == project_id:
+                    conversation["project_id"] = ""
+                    changed = True
+            projects.pop(project_id, None)
+            changed = True
+        return changed
 
 
 def _profile_summary(profile: dict[str, Any]) -> dict[str, Any]:
