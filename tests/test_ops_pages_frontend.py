@@ -68,6 +68,7 @@ def test_operations_pages_have_frontend_state_and_renderers() -> None:
         "renderSidebarProject",
         "projectListExpanded",
         "projectChatExpanded",
+        "projectExpanded",
         "/api/chat/conversations",
     ]:
         assert symbol in app_js
@@ -92,6 +93,8 @@ def test_operations_pages_have_frontend_state_and_renderers() -> None:
     assert "PROJECT_CHAT_VISIBLE_LIMIT" in app_js
     assert "data-project-list-more" in app_js
     assert "data-project-chat-more" in app_js
+    assert "data-project-toggle" in app_js
+    assert "isProjectExpanded" in app_js
 
 
 def test_operations_pages_have_dedicated_styles() -> None:
@@ -114,6 +117,7 @@ def test_operations_pages_have_dedicated_styles() -> None:
         ".project-list-expanded",
         ".project-child-list",
         ".project-child-row",
+        ".project-toggle",
         ".nav-show-more",
         ".workspace::-webkit-scrollbar",
         "@keyframes fileUploadSpinner",
@@ -132,6 +136,8 @@ def test_operations_pages_have_dedicated_styles() -> None:
     assert "grid-template-columns: 260px minmax(0, 1fr);" in css
     assert "height: 304px;" not in css
     assert "max-height: 226px;" not in css
+    assert "max-height: min(48dvh, 460px);" in css
+    assert 'data-section="history"' in css
     assert "min-height: 34px;" in css
     composer_css = css.split(".composer-shell {", 1)[1].split("}", 1)[0]
     assert "position: fixed;" in composer_css

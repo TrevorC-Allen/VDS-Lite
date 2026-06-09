@@ -49,6 +49,7 @@ const state = {
   projectConversations: {},
   projectListExpanded: false,
   projectChatExpanded: {},
+  projectExpanded: {},
   conversations: [],
   projectDetail: null,
   projectTab: "chats",
@@ -1319,8 +1320,11 @@ async function createConversation({ projectId = state.projectId } = {}) {
   state.projectId = projectId;
   state.conversationId = payload.conversation.conversation_id;
   state.conversations.unshift(payload.conversation);
+  state.projectConversations[projectId] = [payload.conversation, ...(state.projectConversations[projectId] || [])];
+  state.projectExpanded[projectId] = true;
   clearConversation();
   renderConversationList();
+  renderProjectList();
   renderProjectHome();
 }
 
@@ -1420,6 +1424,15 @@ function renderProjectList() {
       openProjectMenu(row.dataset.projectId, event.currentTarget);
     });
   }
+  for (const button of el.projectList.querySelectorAll("[data-project-toggle]")) {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const projectId = button.dataset.projectToggle;
+      state.projectExpanded[projectId] = !isProjectExpanded(projectId);
+      if (state.projectExpanded[projectId]) await loadProjectConversations(projectId);
+      renderProjectList();
+    });
+  }
   for (const row of el.projectList.querySelectorAll("[data-project-conversation-id]")) {
     row.querySelector(".project-child-open").addEventListener("click", () => openConversation(row.dataset.projectConversationId));
     row.querySelector(".row-menu").addEventListener("click", (event) => {
@@ -1446,24 +1459,42 @@ function renderProjectList() {
 function renderSidebarProject(project) {
   const projectId = String(project.project_id || "");
   const conversations = state.projectConversations[projectId] || [];
+  const expanded = isProjectExpanded(projectId);
   const chatLimit = state.projectChatExpanded[projectId] ? conversations.length : PROJECT_CHAT_VISIBLE_LIMIT;
   const visibleConversations = conversations.slice(0, chatLimit);
   const moreCount = Math.max(0, conversations.length - visibleConversations.length);
   return `
-    <div class="project-block ${project.project_id === state.projectId ? "active" : ""}">
+    <div class="project-block ${project.project_id === state.projectId ? "active" : ""} ${expanded ? "expanded" : "collapsed"}">
       <div class="nav-row ${project.project_id === state.projectId ? "active" : ""} ${project.pinned ? "pinned" : ""}" data-project-id="${escapeHtml(projectId)}">
+        <button class="project-toggle" type="button" data-project-toggle="${escapeHtml(projectId)}" aria-label="${expanded ? "折叠项目" : "展开项目"}" aria-expanded="${expanded}">
+          <span aria-hidden="true"></span>
+        </button>
         <button class="nav-item project-open" type="button">
           <span class="project-folder" aria-hidden="true"></span>
           <span>${escapeHtml(project.name || "未命名项目")}</span>
         </button>
         <button class="row-menu" type="button" title="项目选项" aria-label="项目选项">•••</button>
       </div>
-      <div class="project-child-list">
+      <div class="project-child-list ${expanded ? "" : "hidden"}">
         ${visibleConversations.map((conversation) => renderSidebarProjectConversation(conversation)).join("")}
         ${moreCount ? `<button class="nav-show-more project-chat-more" type="button" data-project-chat-more="${escapeHtml(projectId)}">显示更多</button>` : ""}
       </div>
     </div>
   `;
+}
+
+function isProjectExpanded(projectId) {
+  return state.projectExpanded[projectId] !== false;
+}
+
+async function loadProjectConversations(projectId) {
+  if (!projectId) return;
+  try {
+    const payload = await getJson(`/api/chat/projects/${encodeURIComponent(projectId)}/conversations`);
+    state.projectConversations[projectId] = payload.conversations || [];
+  } catch (error) {
+    state.projectConversations[projectId] = [];
+  }
 }
 
 function renderSidebarProjectConversation(conversation) {

@@ -165,7 +165,13 @@ button {
 
 .nav-group[data-section="projects"] {
   flex: 0 0 auto;
-  overflow: visible;
+  max-height: min(48dvh, 460px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.nav-group[data-section="history"] {
+  min-height: 128px;
 }
 
 .dataset-sidebar {
@@ -244,7 +250,7 @@ button {
 .project-list-expanded {
   display: grid;
   gap: 3px;
-  overflow: visible;
+  overflow: auto;
 }
 
 .nav-row {
@@ -252,6 +258,10 @@ button {
   grid-template-columns: minmax(0, 1fr) 28px;
   align-items: center;
   border-radius: 10px;
+}
+
+.project-block > .nav-row {
+  grid-template-columns: 22px minmax(0, 1fr) 28px;
 }
 
 .nav-row.active {
@@ -276,6 +286,32 @@ button {
   display: grid;
   gap: 1px;
   padding: 3px 0 5px 26px;
+}
+
+.project-toggle {
+  display: grid;
+  width: 22px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.project-toggle:hover {
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.project-toggle span {
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid #7b8494;
+  border-bottom: 1.5px solid #7b8494;
+  transform: rotate(45deg);
+  transition: transform 120ms ease;
+}
+
+.project-block.collapsed .project-toggle span {
+  transform: rotate(-45deg);
 }
 
 .project-child-row {
