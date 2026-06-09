@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VDS Lite Agent</title>
+    <link rel="stylesheet" href="/web/styles.css?v=20260609-scrollbottom2" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">V</span>
+          <div class="brand-copy">
+            <strong>Virtual Data Scientist</strong>
+            <span>Data analysis chat</span>
+          </div>
+        </div>
+
+        <div class="sidebar-actions">
+          <button id="new-chat-button" class="nav-action primary" type="button">新聊天</button>
+          <button id="search-open-button" class="nav-action" type="button">搜索聊天</button>
+        </div>
+
+        <section class="nav-group sidebar-panel" data-section="projects">
+          <button id="projects-collapse-button" class="sidebar-header-button" type="button" aria-expanded="true" aria-controls="projects-section-body" data-collapse-target="projects">
+            <span>项目</span>
+          </button>
+          <div id="projects-section-body" class="nav-section-body">
+            <div id="project-list" class="nav-list project-list-scroll">
+              <button id="new-project-button" class="nav-item" type="button">新项目</button>
+            </div>
+            <div class="nav-subtitle">project-only memory</div>
+          </div>
+        </section>
+
+        <section class="nav-group grow sidebar-panel" data-section="history">
+          <button id="history-collapse-button" class="sidebar-header-button" type="button" aria-expanded="true" aria-controls="history-section-body" data-collapse-target="history">
+            <span>历史 Chat</span>
+          </button>
+          <div id="history-section-body" class="nav-section-body">
+            <div id="conversation-list" class="nav-list history-list"></div>
+          </div>
+        </section>
+
+        <section class="dataset-sidebar sidebar-panel" data-section="dataset">
+          <button id="dataset-collapse-button" class="sidebar-header-button sidebar-meta-button" type="button" aria-expanded="true" aria-controls="dataset-section-body" data-collapse-target="dataset">
+            <span>数据上下文</span>
+            <span class="meta-count" id="table-count">0</span>
+          </button>
+          <div id="dataset-section-body" class="nav-section-body">
+            <div id="profile-list" class="profile-list sidebar-profile-list empty">上传后这里显示表、字段和样例。</div>
+          </div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div class="workspace-title">VDS</div>
+          <div class="topbar-actions">
+            <button id="profile-toggle" class="chip-button" type="button">查看表页</button>
+            <div class="ops-menu-wrap">
+              <button id="ops-menu-button" class="chip-button ops-menu-button" type="button" aria-expanded="false" aria-controls="ops-menu">管理</button>
+              <div id="ops-menu" class="ops-menu hidden">
+                <button id="ops-menu-monitor" type="button">评估监控</button>
+                <button id="ops-menu-rag" type="button">RAG 建设</button>
+                <button id="ops-menu-template" type="button">分析模板</button>
+              </div>
+            </div>
+            <span id="api-status" class="status-chip">准备就绪</span>
+            <span id="dataset-chip" class="status-chip">未上传数据</span>
+          </div>
+        </header>
+
+        <section id="upload-banner" class="upload-banner hidden" aria-live="polite">
+          <div class="upload-banner-icon" aria-hidden="true"></div>
+          <div class="upload-banner-main">
+            <div class="upload-banner-head">
+              <strong id="upload-banner-title">正在上传文件</strong>
+              <span id="upload-banner-progress">0%</span>
+            </div>
+            <p id="upload-banner-detail">准备上传。</p>
+            <div class="upload-banner-bar" aria-hidden="true">
+              <span id="upload-banner-bar-fill"></span>
+            </div>
+          </div>
+          <button id="upload-banner-close" class="upload-banner-close" type="button" aria-label="关闭上传状态">×</button>
+        </section>
+
+        <section id="project-home" class="project-home hidden">
+          <div class="project-home-header">
+            <div>
+              <h1 id="project-home-title">项目</h1>
+              <p>项目里的对话共享同一份上传数据和文件上下文。</p>
+            </div>
+            <button id="project-home-new-chat" class="nav-action primary" type="button">新聊天</button>
+          </div>
+          <div class="project-tabs" role="tablist" aria-label="项目内容">
+            <button id="project-tab-chats" class="project-tab active" type="button" role="tab" aria-selected="true">对话</button>
+            <button id="project-tab-sources" class="project-tab" type="button" role="tab" aria-selected="false">共享文件</button>
+          </div>
+          <div id="project-chats-panel" class="project-panel">
+            <div id="project-conversation-list" class="project-card-list"></div>
+          </div>
+          <div id="project-sources-panel" class="project-panel hidden">
+            <label class="source-dropzone" for="project-source-input">
+              <input id="project-source-input" type="file" multiple accept=".csv,.xlsx,.xls,.md,.markdown,.txt,.pdf,.doc,.docx,.pages,.rtf" />
+              <strong>上传项目共享文件</strong>
+              <span>CSV / Excel 会成为这个项目的默认数据上下文。</span>
+            </label>
+            <div id="project-source-list" class="project-card-list"></div>
+          </div>
+        </section>
+
+        <section id="empty-state" class="empty-state">
+          <div class="hero-mark">V</div>
+          <div class="hero-copy">
+            <h1>今天要分析什么数据?</h1>
+            <p>上传数据文件，然后直接提问。我会像对话一样展示理解、选择数据、分析和回答的过程。</p>
+          </div>
+        </section>
+
+        <section id="operations-pages" class="operations-pages hidden">
+          <article id="monitor-page" class="ops-page hidden" data-ops-page="monitor">
+            <div class="ops-page-head">
+              <div>
+                <h1>评估监控</h1>
+                <p>记录每次回答的 exactness、faithfulness、coverage、safety 和风险备注。</p>
+              </div>
+              <button id="add-eval-record-button" class="nav-action primary" type="button">新增记录</button>
+            </div>
+            <div class="ops-metric-grid" id="ops-metric-grid"></div>
+            <section class="ops-split">
+              <div class="ops-panel">
+                <h2>评估记录</h2>
+                <div id="ops-eval-table" class="ops-record-table"></div>
+              </div>
+              <form id="eval-record-form" class="ops-panel ops-form">
+                <h2>记录一次评估</h2>
+                <label>问题<input name="question" value="2026-05-19 谁的分销进度最落后？" /></label>
+                <label>Run ID<input name="runId" value="run_demo_rca_001" /></label>
+                <div class="ops-form-grid">
+                  <label>Exactness<input name="exactness" type="number" min="0" max="1" step="0.01" value="0.92" /></label>
+                  <label>Faithfulness<input name="faithfulness" type="number" min="0" max="1" step="0.01" value="0.88" /></label>
+                  <label>Coverage<input name="coverage" type="number" min="0" max="1" step="0.01" value="0.84" /></label>
+                  <label>Safety<input name="safety" type="number" min="0" max="1" step="0.01" value="0.98" /></label>
+                </div>
+                <label>备注<textarea name="notes" rows="3">回答命中核心指标，证据需补充目标表来源。</textarea></label>
+                <button class="nav-action primary" type="submit">保存评估</button>
+              </form>
+            </section>
+          </article>
+
+          <article id="rag-page" class="ops-page hidden" data-ops-page="rag">
+            <div class="ops-page-head">
+              <div>
+                <h1>RAG 建设</h1>
+                <p>管理文档上传、解析、分片、QA 知识库、检索配置、实体链接和答案证据。</p>
+              </div>
+              <label class="nav-action primary ops-upload-action" for="rag-doc-input">
+                上传文档
+                <input id="rag-doc-input" type="file" multiple accept=".pdf,.doc,.docx,.pages,.rtf,.md,.markdown,.txt,.csv,.xls,.xlsx" />
+              </label>
+            </div>
+            <div class="rag-pipeline" id="rag-pipeline"></div>
+            <section class="ops-split">
+              <div class="ops-panel">
+                <h2>文档与分片</h2>
+                <div id="rag-document-list" class="ops-card-list"></div>
+              </div>
+              <div class="ops-panel">
+                <h2>实体和证据链</h2>
+                <div id="rag-entity-links" class="ops-card-list"></div>
+              </div>
+            </section>
+            <section class="ops-split">
+              <form id="rag-qa-form" class="ops-panel ops-form">
+                <h2>QA 知识库</h2>
+                <label>问题<input name="question" value="日目标缺口如何计算？" /></label>
+                <label>答案<textarea name="answer" rows="3">日目标 = 月目标 / 当月分销天数；缺口 = 日目标 - 当日分销额。</textarea></label>
+                <label>证据片段<input name="evidence" value="sheet1: 今日目标计算口径" /></label>
+                <button class="nav-action primary" type="submit">加入 QA</button>
+              </form>
+              <div class="ops-panel">
+                <h2>检索配置</h2>
+                <div id="rag-retrieval-config" class="ops-card-list"></div>
+              </div>
+            </section>
+          </article>
+
+          <article id="template-page" class="ops-page hidden" data-ops-page="template">
+            <div class="ops-page-head">
+              <div>
+                <h1>分析模板</h1>
+                <p>沉淀 RCA、对比、趋势、预测、NL-LF、NL-SQL、数据库查询和外部事件补充经验。</p>
+              </div>
+              <button id="add-template-button" class="nav-action primary" type="button">新增模板</button>
+            </div>
+            <section class="ops-split">
+              <div class="ops-panel">
+                <h2>模板库</h2>
+                <div id="template-library" class="template-library"></div>
+              </div>
+              <form id="template-form" class="ops-panel ops-form">
+                <h2>配置分析经验</h2>
+                <label>模板名称<input name="name" value="Reasoning-driven RCA 根因分析" /></label>
+                <label>适用场景<input name="scenario" value="分销额下降、目标缺口、拜访转化异常" /></label>
+                <label>分析步骤<textarea name="steps" rows="4">1. 定义指标和时间窗口&#10;2. 拆分维度贡献&#10;3. 关联拜访/陈列/目标表&#10;4. 输出证据和下一步动作</textarea></label>
+                <div class="ops-toggle-row">
+                  <label><input name="database" type="checkbox" checked /> 数据库查询</label>
+                  <label><input name="webSearch" type="checkbox" checked /> web search 背景</label>
+                  <label><input name="nlSql" type="checkbox" checked /> NL-SQL</label>
+                  <label><input name="nlLf" type="checkbox" checked /> NL-LF</label>
+                </div>
+                <button class="nav-action primary" type="submit">保存模板</button>
+              </form>
+            </section>
+            <section class="ops-panel">
+              <h2>经验库</h2>
+              <div id="experience-library" class="ops-card-list"></div>
+            </section>
+          </article>
+        </section>
+
+        <section id="conversation" class="conversation hidden">
+          <div id="question-history" class="question-history"></div>
+
+          <article id="assistant-card" class="assistant-card hidden">
+            <div class="assistant-header">
+              <div class="assistant-title">
+                <span class="hero-mark small">V</span>
+                <div>
+                  <strong>分析结果</strong>
+                  <span id="run-id">-</span>
+                </div>
+              </div>
+              <div class="assistant-meta">
+                <span id="intent-label" class="mini-chip">-</span>
+                <span id="attempt-count" class="mini-chip">0 attempts</span>
+              </div>
+            </div>
+
+            <div id="answer" class="answer">上传文件并提问后显示答案。</div>
+            <div id="error-box" class="error-box hidden"></div>
+
+            <div class="detail-grid">
+              <section class="detail-card">
+                <div class="detail-head">
+                  <h2>结果表</h2>
+                  <span id="row-count">0 rows</span>
+                </div>
+                <div id="result-table" class="table-wrap empty">暂无结果表。</div>
+              </section>
+
+              <section class="detail-card">
+                <div class="detail-head">
+                  <h2>执行记录</h2>
+                </div>
+                <ol id="attempt-list" class="attempt-list">
+                  <li>暂无执行记录。</li>
+                </ol>
+              </section>
+
+              <section class="detail-card code-card">
+                <div class="detail-head">
+                  <h2>LLM 生成的 Pandas</h2>
+                </div>
+                <pre id="code-view">暂无代码。</pre>
+              </section>
+            </div>
+          </article>
+        </section>
+
+        <button id="scroll-bottom-button" class="scroll-bottom-button hidden" type="button" aria-label="跳到最新消息">↓</button>
+
+        <div id="profile-drawer-backdrop" class="drawer-backdrop hidden"></div>
+        <section id="profile-drawer" class="profile-drawer hidden">
+          <div class="drawer-header">
+            <div>
+              <strong>已上传数据</strong>
+              <p id="upload-status">等待选择文件。</p>
+            </div>
+            <button id="drawer-close" class="drawer-close" type="button">关闭</button>
+          </div>
+          <div class="drawer-body">
+            <div class="drawer-meta">
+              <span>表数量</span>
+              <span id="drawer-table-count">0</span>
+            </div>
+            <div id="drawer-profile-list" class="profile-list empty">上传后显示表结构。</div>
+          </div>
+        </section>
+
+        <div id="thinking-drawer-backdrop" class="drawer-backdrop hidden"></div>
+        <section id="thinking-drawer" class="thinking-drawer hidden" aria-live="polite">
+          <div class="drawer-header">
+            <div>
+              <strong>思考过程</strong>
+              <p id="thinking-status">等待分析。</p>
+            </div>
+            <button id="thinking-drawer-close" class="drawer-close" type="button">关闭</button>
+          </div>
+          <div id="thinking-drawer-body" class="drawer-body thinking-drawer-body">
+            <div class="history-empty">提交问题后显示当前分析进度。</div>
+          </div>
+        </section>
+
+        <footer class="composer-shell">
+          <div class="composer-frame">
+            <div id="composer-file-list" class="composer-file-list hidden" aria-live="polite"></div>
+            <label class="composer-action" for="file-input" title="上传文件">
+              <input id="file-input" type="file" multiple accept=".csv,.xlsx,.xls,.md,.markdown,.txt,.pdf,.doc,.docx,.pages,.rtf" />
+              <span>+</span>
+            </label>
+            <textarea
+              id="question-input"
+              rows="1"
+              placeholder="向 VDS 提问，例如：哪个城市订单金额最高？"
+            ></textarea>
+            <button id="ask-button" class="send-button" type="button" disabled aria-label="发送">
+              <span>↗</span>
+            </button>
+          </div>
+          <div class="composer-status">
+            <span id="composer-hint">支持 CSV、Excel、Markdown、TXT、PDF、Word、Pages 等文件。</span>
+          </div>
+        </footer>
+      </main>
+    </div>
+    <div id="context-menu" class="context-menu hidden"></div>
+    <div id="search-modal-backdrop" class="search-backdrop hidden"></div>
+    <section id="search-modal" class="search-modal hidden" role="dialog" aria-modal="true" aria-labelledby="search-modal-title">
+      <div class="search-box">
+        <div class="search-head">
+          <input id="search-input" type="search" placeholder="搜索聊天、项目、提问或回复..." autocomplete="off" />
+          <button id="search-close-button" type="button" aria-label="关闭搜索">×</button>
+        </div>
+        <button id="search-new-chat" class="search-action-row" type="button">
+          <span>✎</span>
+          <strong>新聊天</strong>
+        </button>
+        <div id="search-status" class="search-status">输入关键词搜索全部项目和聊天内容。</div>
+        <div id="search-results" class="search-results"></div>
+      </div>
+    </section>
+    <script src="/web/app.js?v=20260609-scrollbottom2"></script>
+  </body>
+</html>

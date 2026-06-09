@@ -1,0 +1,10 @@
+按客户 segment 看销售额，哪个 segment 最高？需要 join 哪张表？
+Monitor 为什么表现最好？它主要来自哪些国家和客户 segment？
+Strategic 客户和 Growth 客户相比，哪个群体更值得下月重点维护？
+Notebook 有退货，这个退货来自哪个客户 segment 和 account owner？
+如果下月只能主推一个产品类别，结合订单表和产品表应该选哪个 category？
+UK 的销售额主要来自哪个客户 segment 和产品 category？
+哪些 account owner 管理的客户贡献销售额最高？
+Hardware 类产品在不同 region 的销售额分布怎么样？
+复购客户 C-002 和 C-003 分别属于什么 segment，他们买的产品类别是否发生变化？
+退货是否集中在某个产品优先级 launch_priority 上？

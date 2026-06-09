@@ -1,0 +1,7 @@
+product_id,product,category,launch_priority
+P-001,Notebook,Office,medium
+P-002,Pen,Office,low
+P-003,Desk Chair,Furniture,medium
+P-004,Monitor,Hardware,high
+P-005,Keyboard,Hardware,medium
+P-006,Mouse,Hardware,medium

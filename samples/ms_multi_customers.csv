@@ -1,0 +1,8 @@
+customer_id,segment,account_owner,region
+C-001,Strategic,Ada,North Europe
+C-002,Growth,Ben,West Europe
+C-003,Strategic,Ada,Central Europe
+C-004,Growth,Ben,North Europe
+C-005,SMB,Chen,Central Europe
+C-006,Growth,Ben,West Europe
+C-007,SMB,Chen,North Europe
