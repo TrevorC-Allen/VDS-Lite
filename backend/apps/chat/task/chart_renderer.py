@@ -36,6 +36,19 @@ def build_rendered_chart(chart_spec: Any, execution: dict[str, Any]) -> dict[str
         inferred_x, inferred_y = _infer_xy(rows, columns)
         x_column = x_column or inferred_x
         y_column = y_column or inferred_y
+    if chart_type == "line" and (
+        _looks_like_time_column(str(y_column or ""))
+        or not _column_is_numeric(rows, y_column)
+        or (not _looks_like_time_column(str(x_column or "")) and any(_looks_like_time_column(column) for column in columns))
+    ):
+        inferred_x, inferred_y = _infer_xy(rows, columns)
+        x_column = inferred_x or x_column
+        y_column = inferred_y or y_column
+    preferred_y = _preferred_metric_column_from_text(spec, rows, columns)
+    if preferred_y and _column_is_numeric(rows, preferred_y):
+        y_column = preferred_y
+    if chart_type in {"bar", "horizontal_bar", "pie", "donut"} and _column_is_numeric(rows, x_column) and _column_is_numeric(rows, y_column):
+        x_column = next((column for column in columns if column != y_column and not _column_is_numeric(rows, column)), x_column)
     if chart_type in {"bar", "horizontal_bar", "line", "pie", "donut"} and _column_is_numeric(rows, x_column) and not _column_is_numeric(rows, y_column):
         x_column, y_column = y_column, x_column
     title = str(spec.get("title") or _default_title(chart_type, x_column, y_column))
@@ -225,7 +238,8 @@ def _infer_chart_type(rows: list[dict[str, Any]], columns: list[str], spec: dict
 
 def _infer_xy(rows: list[dict[str, Any]], columns: list[str]) -> tuple[str | None, str | None]:
     numeric_columns = _numeric_columns(rows, columns)
-    y_column = numeric_columns[0] if numeric_columns else None
+    y_column = next((column for column in numeric_columns if not _looks_like_time_column(column)), None)
+    y_column = y_column or (numeric_columns[0] if numeric_columns else None)
     categorical_columns = [column for column in columns if column != y_column]
     x_column = next((column for column in categorical_columns if _looks_like_time_column(column)), None)
     x_column = x_column or (categorical_columns[0] if categorical_columns else None)
@@ -268,9 +282,22 @@ def _usable_column(value: Any, columns: list[str]) -> str | None:
     return lookup.get(text.lower())
 
 
+def _preferred_metric_column_from_text(spec: dict[str, Any], rows: list[dict[str, Any]], columns: list[str]) -> str | None:
+    text = " ".join(str(spec.get(key) or "") for key in ("title", "reason", "selection_reason")).lower()
+    if not text:
+        return None
+    numeric_columns = _numeric_columns(rows, columns)
+    for column in numeric_columns:
+        if column and column.lower() in text:
+            return column
+    if any(token in text for token in ("完成率", "变化率", "环比", "同比", "rate", "ratio", "percent", "%")):
+        return next((column for column in numeric_columns if any(token in column.lower() for token in ("率", "rate", "ratio", "percent", "pct"))), None)
+    return None
+
+
 def _looks_like_time_column(column: str) -> bool:
     lowered = column.lower()
-    return any(token in lowered for token in ("date", "time", "month", "year", "week", "period", "日期", "月份", "时间"))
+    return any(token in lowered for token in ("date", "time", "month", "year", "week", "period", "日期", "月份", "年月", "时间"))
 
 
 def _default_title(chart_type: str, x_column: str | None, y_column: str | None) -> str:
@@ -325,6 +352,11 @@ def _sector_path(cx: int, cy: int, radius: int, start_deg: float, end_deg: float
 
 def _to_float(value: Any) -> float | None:
     try:
+        if isinstance(value, str):
+            text = value.strip().replace(",", "")
+            if text.endswith("%"):
+                return float(text[:-1]) / 100
+            return float(text)
         return float(value)
     except (TypeError, ValueError):
         return None

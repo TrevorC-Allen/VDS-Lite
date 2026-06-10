@@ -52,7 +52,8 @@ def create_llm_client() -> OpenAICompatibleClient:
         api_key = _required_env("OPENAI_API_KEY")
         base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-    return OpenAICompatibleClient(api_key=api_key, base_url=base_url, model=model)
+    timeout_seconds = int(os.getenv("VDS_LITE_LLM_TIMEOUT_SECONDS") or os.getenv("VDS_LLM_TIMEOUT_SECONDS") or "60")
+    return OpenAICompatibleClient(api_key=api_key, base_url=base_url, model=model, timeout_seconds=timeout_seconds)
 
 
 def _required_env(name: str) -> str:

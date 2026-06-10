@@ -39,7 +39,8 @@ class StubLlmClient:
         self.prompts.append(prompt)
         if "语义校验器" in prompt:
             return '{"ok": true, "confidence": 0.9, "verdict": "语义匹配", "issues": [], "repair_instructions": ""}'
-        self.last_prompt = prompt
+        if "结果解读器" not in prompt:
+            self.last_prompt = prompt
         return self.response
 
 
@@ -59,7 +60,11 @@ class SequenceLlmClient:
 
 
 class RaisingLlmClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def complete(self, prompt: str) -> str:
+        self.calls += 1
         raise ConnectionError("provider disconnected")
 
 
@@ -401,6 +406,76 @@ def test_agent_returns_llm_response_sections_and_rendered_chart(tmp_path: Path) 
     assert result["execution_error"] is None
 
 
+def test_agent_uses_post_execution_llm_sections_from_real_result(tmp_path: Path) -> None:
+    class InsightLlmClient:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def complete(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            if "语义校验器" in prompt:
+                return '{"ok": true, "confidence": 0.9, "verdict": "语义匹配", "issues": [], "repair_instructions": ""}'
+            if "结果解读器" in prompt:
+                return json.dumps(
+                    {
+                        "result_summary": "Monitor 以 360.0 的销售额排第一，明显高于第二名。",
+                        "analysis": ["真实执行结果返回 3 个产品，按 sales 降序排列。"],
+                        "insights": ["Monitor 由 11 月和 12 月两笔订单共同贡献，领先不是单笔偶然值。"],
+                        "next_steps": ["继续按月份拆解 Monitor 的销售变化。"],
+                    },
+                    ensure_ascii=False,
+                )
+            return json_payload(
+                intent="rank products by sales with chart",
+                pandas_code=(
+                    "def analyze(df):\n"
+                    "    rows = df.groupby('product', as_index=False)['sales'].sum().sort_values('sales', ascending=False).head(3)\n"
+                    "    top = rows.iloc[0]\n"
+                    "    return {\n"
+                    "        'direct_answer': f\"销售额最高的是 {top['product']}，销售额 {top['sales']:.1f}\",\n"
+                    "        'rows': rows.to_dict(orient='records'),\n"
+                    "        'columns': list(rows.columns),\n"
+                    "        'response_sections': {'analysis': ['旧的模板分析'], 'insights': ['旧的模板洞察'], 'next_steps': ['旧的模板建议']}\n"
+                    "    }"
+                ),
+                expected_output="top products table with chart",
+                chart_spec={
+                    "chart_type": "horizontal_bar",
+                    "title": "产品销售额 Top 3",
+                    "x": "product",
+                    "y": "sales",
+                    "reason": "TopN ranking is best compared with a horizontal bar chart.",
+                    "confidence": 0.9,
+                },
+            )
+
+    store = CsvDatasetStore(root_dir=tmp_path / "storage")
+    dataset = store.save_upload(write_csv(tmp_path), original_filename="sales.csv")
+    llm = InsightLlmClient()
+    agent = LlmPandasAgent(llm_client=llm)
+
+    result = agent.ask(dataset, "销售额最高前 3 个产品？")
+
+    insight_prompt = next(prompt for prompt in llm.prompts if "结果解读器" in prompt)
+    assert "销售额最高的是 Monitor，销售额 360.0" in insight_prompt
+    assert '"product": "Monitor"' in insight_prompt
+    assert result["response_sections"]["result_summary"].startswith("Monitor 以 360.0")
+    assert result["response_sections"]["insights"][0].startswith("Monitor 由 11 月")
+
+
+def test_repair_prompt_treats_keyerror_as_real_schema_mismatch() -> None:
+    prompt = build_repair_prompt(
+        original_prompt="字段 profile：tables['v_mkt_dsp_execute_mi'] columns: ['dsp_form_name']; tables['v_mkt_dsp_actv_mi'] columns: ['dsp_name']",
+        previous_raw='{"pandas_code": "bad"}',
+        previous_code="df = tables['v_mkt_dsp_execute_mi']; df['dsp_name']",
+        error="KeyError: 'dsp_name'",
+    )
+
+    assert "KeyError" in prompt
+    assert "真实列名" in prompt
+    assert "换到包含该字段或枚举值的真实表" in prompt
+
+
 def test_agent_includes_conversation_history_in_prompt(tmp_path: Path) -> None:
     store = CsvDatasetStore(root_dir=tmp_path / "storage")
     dataset = store.save_upload(write_csv(tmp_path), original_filename="sales.csv")
@@ -680,13 +755,16 @@ def test_sanity_check_allows_time_field_dimension_with_month_annotation(tmp_path
 def test_agent_surfaces_llm_provider_errors_without_http_500_shape(tmp_path: Path) -> None:
     store = CsvDatasetStore(root_dir=tmp_path / "storage")
     dataset = store.save_upload(write_csv(tmp_path), original_filename="sales.csv")
-    agent = LlmPandasAgent(llm_client=RaisingLlmClient())
+    llm = RaisingLlmClient()
+    agent = LlmPandasAgent(llm_client=llm)
 
     result = agent.ask(dataset, "总销售额是多少？")
 
     assert result["direct_answer"] == ""
     assert result["rows"] == []
     assert "provider disconnected" in result["execution_error"]
+    assert llm.calls == 1
+    assert len(result["attempts"]) == 1
     assert result["attempts"][0]["ok"] is False
 
 
@@ -1013,8 +1091,8 @@ def test_prompt_promotes_uploaded_business_guidelines(tmp_path: Path) -> None:
     assert "普通数据分析只能聚合、筛选、join 业务数据表" in prompt
     assert '"business_data_tables"' in prompt
     assert '"guideline_tables"' in prompt
-    assert '"table_role": "business_data"' in prompt
-    assert '"table_role": "guideline"' in prompt
+    assert '"table_role":"business_data"' in prompt
+    assert '"table_role":"guideline"' in prompt
     assert "guideline tables are rule/metadata context and must not be treated as fact data" in prompt
     assert "全局筛选（考核口径）" in prompt
     assert "核心提取规则" in prompt
@@ -1042,7 +1120,7 @@ def test_markdown_upload_becomes_guideline_context(tmp_path: Path) -> None:
     assert any(entry["original_filename"] == "规则说明.md" for entry in dataset.profile["tables"])
     assert "doc_" in next(name for name in dataset.tables if "规则说明" in name)
     assert "业务口径：所有销售额分析必须排除退货订单" in prompt
-    assert '"table_role": "guideline"' in prompt
+    assert '"table_role":"guideline"' in prompt
     assert "口径/规则/说明表包括" in prompt
 
 
@@ -1125,12 +1203,15 @@ def test_prompt_requires_business_date_progress_and_growth_contribution_guards(t
     assert "必须按订单号先汇总订单金额，再按订单求平均" in prompt
     assert "不得抛 ValueError" in prompt
     assert "signed contribution = 本期指标 - 上期指标" in prompt
+    assert "YYYYMM 月份序列必须用 pd.period_range" in prompt
+    assert "禁止使用 range(202512, 202606)" in prompt
     assert "Pandas 会生成 _x/_y 后缀" in prompt
     assert "必须改为优先按 date_id/date_fmt 精确业务日期取数" in repair_prompt
     assert "仅对有当天事实且分母可计算的对象排名" in repair_prompt
     assert "用户说“每位业代/各业代”不等于要求包含目标表中当天无事实记录的人员" in repair_prompt
     assert "检查 pd.notna、np.isfinite 和分母 > 0" in repair_prompt
     assert "不要按两期合计金额或本期单期金额排序" in repair_prompt
+    assert "YYYYMM 月份序列必须用 pd.period_range" in repair_prompt
     assert "是否因为左右表同名列被 Pandas 改成 _x/_y 后缀" in repair_prompt
     assert "df['sign_time'] == 'YYYY-MM-DD'" in repair_prompt
 
@@ -1187,6 +1268,75 @@ def test_chart_renderer_uses_llm_spec_with_execution_rows() -> None:
     assert chart["x"] == "month"
     assert chart["y"] == "sales"
     assert chart["image_data_uri"].startswith("data:image/svg+xml;base64,")
+
+
+def test_chart_renderer_repairs_reversed_line_axes_with_time_and_measure() -> None:
+    chart = build_rendered_chart(
+        {
+            "chart_type": "line",
+            "title": "陈列执行量走势",
+            "x": "陈列类型",
+            "y": "年月",
+            "reason": "LLM accidentally reversed trend axes.",
+        },
+        {
+            "rows": [
+                {"年月": 202501, "陈列类型": "水堆", "执行量": 226.779},
+                {"年月": 202502, "陈列类型": "水堆", "执行量": 246.2172},
+                {"年月": 202501, "陈列类型": "货架", "执行量": 36.7166},
+            ],
+            "columns": ["年月", "陈列类型", "执行量"],
+        },
+    )
+
+    assert chart["chart_type"] == "line"
+    assert chart["x"] == "年月"
+    assert chart["y"] == "执行量"
+    assert chart["image_data_uri"].startswith("data:image/svg+xml;base64,")
+
+
+def test_chart_renderer_prefers_rate_column_when_title_requests_rate() -> None:
+    chart = build_rendered_chart(
+        {
+            "chart_type": "horizontal_bar",
+            "title": "2026年4月各业代分销目标完成率排名",
+            "x": "业代编码",
+            "y": "目标金额",
+            "reason": "LLM selected a horizontal bar chart.",
+        },
+        {
+            "rows": [
+                {"业代编码": "ysun53", "目标金额": 274831.2, "实际分销金额": 118869.49, "完成率": "43.25%"},
+                {"业代编码": "czma123", "目标金额": 764946.84, "实际分销金额": 325050.68, "完成率": "42.49%"},
+            ],
+            "columns": ["业代编码", "目标金额", "实际分销金额", "完成率"],
+        },
+    )
+
+    assert chart["x"] == "业代编码"
+    assert chart["y"] == "完成率"
+
+
+def test_chart_renderer_repairs_bar_chart_when_both_axes_are_numeric() -> None:
+    chart = build_rendered_chart(
+        {
+            "chart_type": "horizontal_bar",
+            "title": "2026年4月各业代实际分销金额Top5",
+            "x": "实际分销金额",
+            "y": "实际分销金额",
+            "reason": "LLM accidentally used the metric for both axes.",
+        },
+        {
+            "rows": [
+                {"业代编码": "czma123", "业代": "马超振", "实际分销金额": 325050.68},
+                {"业代编码": "ysun53", "业代": "孙源", "实际分销金额": 118869.49},
+            ],
+            "columns": ["业代编码", "业代", "实际分销金额"],
+        },
+    )
+
+    assert chart["x"] == "业代编码"
+    assert chart["y"] == "实际分销金额"
 
 
 def test_chart_renderer_tolerates_reversed_horizontal_bar_axes() -> None:
@@ -1363,10 +1513,11 @@ def test_agent_retries_once_with_failure_feedback_after_unsafe_import(tmp_path: 
     assert result["direct_answer"] == "Total sales is 648.0"
     assert result["execution_error"] is None
     assert result["intent"] == "safe total sales"
-    assert len(llm.prompts) == 3
+    assert len(llm.prompts) == 4
     assert "上一次生成失败" in llm.prompts[1]
     assert "Import is not allowed in generated code: os" in llm.prompts[1]
     assert "可以按需 import 常见分析库" in llm.prompts[1]
+    assert "结果解读器" in llm.prompts[3]
     assert result["attempts"][0]["ok"] is False
     assert result["attempts"][1]["ok"] is True
 
@@ -1394,8 +1545,9 @@ def test_agent_retries_once_with_failure_feedback_after_syntax_error(tmp_path: P
 
     assert result["direct_answer"] == "Rows: 6"
     assert result["execution_error"] is None
-    assert len(llm.prompts) == 3
+    assert len(llm.prompts) == 4
     assert "invalid Python syntax" in llm.prompts[1]
+    assert "结果解读器" in llm.prompts[3]
 
 
 def test_agent_retries_once_after_malformed_result_shape(tmp_path: Path) -> None:
@@ -1421,8 +1573,9 @@ def test_agent_retries_once_after_malformed_result_shape(tmp_path: Path) -> None
 
     assert result["direct_answer"] == "ok"
     assert result["execution_error"] is None
-    assert len(llm.prompts) == 3
+    assert len(llm.prompts) == 4
     assert "columns" in llm.prompts[1]
+    assert "结果解读器" in llm.prompts[3]
     assert result["attempts"][0]["ok"] is False
     assert result["attempts"][1]["ok"] is True
 

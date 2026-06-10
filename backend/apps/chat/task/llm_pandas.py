@@ -1,24 +1,26 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass, replace
 from typing import Any, Protocol
 
 from backend.apps.chat.task.chart_renderer import build_rendered_chart
 from backend.apps.chat.task.code_runner import CodeExecutionError, UnsafeCodeError, run_pandas_code
 from backend.apps.datasource.store import CsvDataset
 
-PROMPT_PROFILE_ROW_LIMIT = 2
-PROMPT_SAMPLE_COLUMN_LIMIT = 24
+PROMPT_PROFILE_ROW_LIMIT = 1
+PROMPT_SAMPLE_COLUMN_LIMIT = 14
 PROMPT_SAMPLE_VALUE_LIMIT = 3
 PROMPT_RELATION_LIMIT = 18
-PROMPT_FILE_CONTEXT_LIMIT = 50000
-PROMPT_TABLE_CONTEXT_LIMIT = 6000
-PROMPT_MEASURE_DETAIL_LIMIT = 80
-PROMPT_GUIDELINE_LIMIT = 14000
+PROMPT_FILE_CONTEXT_LIMIT = 22000
+PROMPT_TABLE_CONTEXT_LIMIT = 1000
+PROMPT_CANDIDATE_COLUMN_LIMIT = 24
+PROMPT_MEASURE_DETAIL_LIMIT = 20
+PROMPT_GUIDELINE_LIMIT = 6000
 
 
 class LlmClient(Protocol):
@@ -74,7 +76,7 @@ class LlmPandasAgent:
                         "error": execution_error,
                     }
                 )
-                continue
+                break
             try:
                 llm_payload = parse_llm_json(llm_raw)
                 pandas_code = str(llm_payload["pandas_code"])
@@ -88,11 +90,21 @@ class LlmPandasAgent:
                     pandas_code=pandas_code,
                     llm_client=self.llm_client,
                 )
-                response_sections = normalize_response_sections(
+                base_response_sections = normalize_response_sections(
                     execution.get("response_sections") or llm_payload.get("response_sections") or {},
                     execution,
                 )
                 chart = build_rendered_chart(llm_payload.get("chart_spec") or {}, execution)
+                response_sections = generate_result_response_sections(
+                    dataset=dataset,
+                    question=question,
+                    conversation_history=conversation_history or [],
+                    llm_payload=llm_payload,
+                    execution=execution,
+                    chart=chart,
+                    fallback_sections=base_response_sections,
+                    llm_client=self.llm_client,
+                )
                 execution_error = None
                 attempts.append(
                     {
@@ -256,8 +268,8 @@ def build_overview_prompt(
     question: str,
     conversation_history: list[dict[str, Any]] | None = None,
 ) -> str:
-    profile_json = json.dumps(_compact_profile_for_prompt(dataset), ensure_ascii=False, indent=2)
-    evidence_pack_json = json.dumps(_compact_evidence_pack_for_prompt(dataset), ensure_ascii=False, indent=2)
+    profile_json = json.dumps(_compact_profile_for_prompt(dataset, question=question, overview=True), ensure_ascii=False, separators=(",", ":"))
+    evidence_pack_json = json.dumps(_compact_evidence_pack_for_prompt(dataset, question=question, overview=True), ensure_ascii=False, separators=(",", ":"))
     business_guidelines = _business_guidelines_for_prompt(dataset=dataset, question=question)
     file_context = _file_context(dataset)
     analyze_contract = _analyze_contract(dataset)
@@ -314,10 +326,10 @@ def build_prompt(
     question: str,
     conversation_history: list[dict[str, Any]] | None = None,
 ) -> str:
-    profile_json = json.dumps(_compact_profile_for_prompt(dataset), ensure_ascii=False, indent=2)
-    evidence_pack_json = json.dumps(_compact_evidence_pack_for_prompt(dataset), ensure_ascii=False, indent=2)
+    profile_json = json.dumps(_compact_profile_for_prompt(dataset, question=question), ensure_ascii=False, separators=(",", ":"))
+    evidence_pack_json = json.dumps(_compact_evidence_pack_for_prompt(dataset, question=question), ensure_ascii=False, separators=(",", ":"))
     business_guidelines = _business_guidelines_for_prompt(dataset=dataset, question=question)
-    file_context = _file_context(dataset)
+    file_context = _file_context(dataset, question=question)
     analyze_contract = _analyze_contract(dataset)
     history_context = _history_context(conversation_history or [])
     return f"""你是一个 CSV 数据分析 Agent。你必须阅读字段 profile、文件内容摘要和代表性样本，然后生成 Pandas 代码。
@@ -363,6 +375,7 @@ def build_prompt(
 37. “当天分销进度/日目标达成/落后/补多少单”这类问题如果依赖当天实际分销、当天已签收订单或当天平均单额，默认只在当天有已签收事实记录且可计算分母的对象中排名；不要让目标表中当天无订单、实际为 0、平均单额为 NaN/0 的对象因为填 0 成为“最落后/需补最多”的答案。用户说“每位业代/各业代”只表示需要逐业代计算，不等于要求把目标表中当天无事实记录的人员纳入排名；只有用户或 guideline 明确说“包括无订单/0销售/无分销/目标表所有人”时，才可以把这些 target-only 对象纳入排名，并必须说明这个口径。可以在 assumptions/direct_answer 中单独说明无当天订单的对象未纳入可估算排名。
 38. “约等于多少单/平均每单金额”必须按订单号先汇总订单金额，再按订单求平均；不要用明细行平均冒充订单平均。任何除法或 math.ceil/int/round 前必须先检查分母、结果是否非空且 finite；遇到 NaN/inf/0 分母时返回“无法估算单数”或改用明确说明的总体平均，不得抛 ValueError。
 39. 两期增长的“主要由谁贡献”必须计算每个贡献对象的 signed contribution = 本期指标 - 上期指标，再排序；不要用两期合计金额、单期金额或占总额最高者替代增长贡献者。
+39a. YYYYMM 月份序列必须用 pd.period_range、pd.date_range(freq='MS') 或 PeriodIndex 生成真实月份；禁止使用 range(202512, 202606) 这类整数递增来生成月份，因为会产生 202513、202514 等无效月份。代码返回 rows 前必须保证月份字段的月份部分在 01-12 之间。
 40. merge/join 后如果左右表都有同名列，例如 emp_name、cust_name、ctg_name，Pandas 会生成 _x/_y 后缀；代码必须在 merge 后显式选择、coalesce 或 rename 展示列，不要继续访问不存在的无后缀列名。
 41. “高销售低陈列/高陈列低销售/高投入低产出/低投入高产出”这类象限或错配问题，不能只用中位数硬分后回答“未发现”。必须同时计算至少两个指标及其比例/效率，例如 销售金额、陈列执行量、销售/陈列、陈列/销售；即使没有严格落入象限的对象，也要返回最接近的 Top 候选并说明“按效率排名识别候选”。direct_answer 不能只说“未发现”，必须分别点名“高销售低陈列候选”和“高陈列低销售候选”；rows 必须包含 category/候选类型 或 销售陈列效率/陈列销售比例 等可解释列。若用户未指定月份/日期，不要擅自只取最新月；应按全量可用期间或可解释的共同期间聚合。若某个陈列指标在当前过滤后全 0，必须检查并改用非零陈列执行指标，不能用全 0 指标做象限分类。默认图表选择 bar 或 horizontal_bar，不要返回 chart_type="none"。
 42. “确认金额/分销金额、陈列费率、投入产出错配风险”默认口径：比例越高代表陈列确认金额相对分销金额越高，更可能是投入偏高或产出不足风险；比例为 0 或很低通常表示陈列投入低，不应直接说成“投入产出风险最高”，除非用户明确问“投入不足/陈列不足”。response_sections 和 direct_answer 必须保持这个方向一致。
@@ -429,6 +442,7 @@ def build_repair_prompt(original_prompt: str, previous_raw: str, previous_code: 
 18. 如果失败点是维度字段全为空或缺失，例如“校区名称字段全部为空”，必须选择语义最接近且非空的替代字段继续分析，如学区/区域/城市/门店名称/站点名称/院区名称，并在 assumptions 中记录替代关系。
 19. 如果失败点是“结果全 0 / 最高为 0 / 指标口径可能选错”，必须重新查看 candidate_columns.measure_details，检查同表语义相近的数值候选字段；优先使用过滤后有非零值、且字段名/样例更贴近用户问题的指标。不要继续用全 0 字段输出误导性 Top1。用户泛称“陈列”时，确认金额全 0 就改用陈列执行量、签约金额、单位数、装载数或执行次数等非零陈列执行指标。
 20. 如果失败点是 KeyError，且 key 是你自己创造的中文展示列名或派生列名，必须把 DataFrame rename 到该展示列名后再 to_dict，或改用 rows 里真实存在的 key；columns、rows、direct_answer 三者必须一致。
+20a. 如果失败点是 KeyError，且 key 看起来是业务字段名，必须回到原 prompt 的字段 profile、Evidence Pack 和文件样本核对真实列名；不得继续访问缺失列。若当前表没有该字段或用户点名的枚举值，必须换到包含该字段或枚举值的真实表，或改用同表真实存在且语义等价的字段，并在 assumptions/direct_answer 说明替代口径。代码中访问字段前要用 columns 判断并给出可读诊断，不能再次抛 KeyError。
 21. 如果失败点是 timeout 且问题要求明细，必须限制 rows 数量，例如 head(100)，同时保留总笔数、总金额或聚合结果；不要把全部明细转成 JSON。
 22. 如果上一段代码用 contains/regex/startswith 筛选用户给出的文本枚举值，但 Evidence Pack、样例或实际列值中存在精确匹配，必须改为 == 或 isin 精确匹配；只有用户明确要求“包含/带有/相关”才保留模糊包含。
 23. 如果上一段代码选择了带“.T/含税/净价/供价”等限定的金额字段，而用户只问普通“金额/分销金额/销售额”，必须重新按字段注释选择精确匹配的普通金额字段；除非用户明确要求限定口径。
@@ -437,6 +451,7 @@ def build_repair_prompt(original_prompt: str, previous_raw: str, previous_code: 
 26. 如果上一段代码把无当天已签收事实、平均单额为 NaN/0 的对象填 0 后纳入“进度最落后/补单估算”排名，必须改为仅对有当天事实且分母可计算的对象排名，并把无法估算对象放入说明而不是作为第一名。用户说“每位业代/各业代”不等于要求包含目标表中当天无事实记录的人员；只有明确说“包括无订单/0销售/无分销/目标表所有人”才纳入 target-only 对象。
 27. 如果失败点包含 cannot convert float NaN to integer、NaN、inf、division by zero，必须在所有 math.ceil/int/round 前检查 pd.notna、np.isfinite 和分母 > 0；无法估算时返回可读诊断，不要抛异常。
 28. 如果问题问“增长主要由哪位/哪个对象贡献”，必须按贡献对象分别计算本期 - 上期的增长贡献并排序，不要按两期合计金额或本期单期金额排序。
+28a. YYYYMM 月份序列必须用 pd.period_range、pd.date_range(freq='MS') 或 PeriodIndex 生成真实月份；禁止使用 range(202512, 202606) 这类整数递增来生成月份，因为会产生 202513、202514 等无效月份。修复后要过滤或重建无效月份。
 29. 如果失败点是 KeyError 且上一段代码刚做过 merge/join，必须检查是否因为左右表同名列被 Pandas 改成 _x/_y 后缀；新代码要在 merge 后显式生成展示列，例如 emp_name = emp_name_x.combine_first(emp_name_y)，或在 merge 前只保留一个名称列。
 30. 如果失败点涉及“高销售低陈列/高陈列低销售/高投入低产出/低投入高产出”，新代码必须返回效率或比例排名候选，不得继续回答“未发现”；如果严格象限为空，也要给出最接近候选和判断口径。direct_answer 必须分别点名两类候选，rows 必须包含候选类型或效率/比例解释列。不得在用户未指定时间时只取最新月；不得用过滤后全 0 的陈列指标继续分类，必须改用非零陈列执行指标或全量可用期间。
 31. 如果失败点涉及“确认金额/分销金额、陈列费率、投入产出错配风险”，必须把高比例解释为投入偏高或产出不足风险，把低比例解释为投入低或陈列不足；不得把 0 或低比例直接说成投入产出风险最高。
@@ -467,27 +482,30 @@ def _analyze_contract(dataset: CsvDataset) -> str:
     return "pandas_code 必须定义函数 analyze(df) -> dict。"
 
 
-def _file_context(dataset: CsvDataset) -> str:
+def _file_context(dataset: CsvDataset, question: str | None = None) -> str:
     if len(dataset.tables) <= 1:
         return _limit_text(dataset.csv_text, PROMPT_FILE_CONTEXT_LIMIT)
     parts: list[str] = ["多文件数据集。后端会把每个文件或 sheet 作为 tables[表名] 传入 analyze(tables)。"]
+    relevant_tables = set(_relevant_table_names(dataset, question or "", overview=False))
     for table_name, context_text in dataset.csv_texts.items():
-        parts.append(f"引用方式: tables['{table_name}']\n{_limit_text(context_text, PROMPT_TABLE_CONTEXT_LIMIT)}")
+        table_limit = PROMPT_TABLE_CONTEXT_LIMIT if table_name in relevant_tables else 420
+        parts.append(f"引用方式: tables['{table_name}']\n{_limit_text(context_text, table_limit)}")
     return _limit_text("\n\n---\n\n".join(parts), PROMPT_FILE_CONTEXT_LIMIT)
 
 
-def _compact_profile_for_prompt(dataset: CsvDataset) -> dict[str, Any]:
+def _compact_profile_for_prompt(dataset: CsvDataset, question: str | None = None, overview: bool = False) -> dict[str, Any]:
     profile = dataset.profile
     tables = []
+    relevant_tables = set(_relevant_table_names(dataset, question or "", overview=overview))
     for entry in profile.get("tables", []):
         table_name = str(entry.get("table_name") or "")
         table_profile = dataset.profiles_by_table.get(table_name) or profile.get("tables_by_name", {}).get(table_name, entry)
         role = _table_role(table_name, dataset.csv_texts.get(table_name, ""))
-        tables.append(_compact_table_profile(table_name, table_profile, entry, role))
+        tables.append(_compact_table_profile(table_name, table_profile, entry, role, detailed=overview or table_name in relevant_tables))
     if not tables and dataset.profiles_by_table:
         for table_name, table_profile in dataset.profiles_by_table.items():
             role = _table_role(table_name, dataset.csv_texts.get(table_name, ""))
-            tables.append(_compact_table_profile(table_name, table_profile, table_profile, role))
+            tables.append(_compact_table_profile(table_name, table_profile, table_profile, role, detailed=overview or table_name in relevant_tables))
     guideline_tables = [table["table_name"] for table in tables if table.get("table_role") == "guideline"]
     business_tables = [table["table_name"] for table in tables if table.get("table_role") == "business_data"]
     return {
@@ -514,9 +532,11 @@ def _compact_table_profile(
     table_profile: dict[str, Any],
     entry: dict[str, Any],
     table_role: str,
+    *,
+    detailed: bool = True,
 ) -> dict[str, Any]:
     columns = table_profile.get("columns", [])
-    return {
+    payload = {
         "table_name": table_name,
         "table_role": table_role,
         "original_filename": entry.get("original_filename") or table_profile.get("original_filename"),
@@ -526,8 +546,12 @@ def _compact_table_profile(
         "column_count": table_profile.get("column_count"),
         "llm_context_mode": table_profile.get("llm_context_mode"),
         "columns": [{"n": column.get("name"), "t": column.get("dtype")} for column in columns],
-        "candidate_columns": _candidate_columns_for_prompt(columns),
     }
+    if detailed:
+        payload["candidate_columns"] = _candidate_columns_for_prompt(columns)
+    else:
+        payload["context_note"] = "summary_only_for_prompt; full DataFrame and all columns are still available in tables during execution"
+    return payload
 
 
 def _candidate_columns_for_prompt(columns: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -546,6 +570,8 @@ def _candidate_columns_for_prompt(columns: list[dict[str, Any]]) -> dict[str, li
             candidates["dimension"].append(name)
         if evidence.get("candidate_time_evidence"):
             candidates["time"].append(name)
+    for key in ("id", "measure", "dimension", "time"):
+        candidates[key] = candidates[key][:PROMPT_CANDIDATE_COLUMN_LIMIT]
     if measure_details:
         candidates["measure_details"] = measure_details
     return {key: values for key, values in candidates.items() if values}
@@ -566,11 +592,12 @@ def _measure_detail_for_prompt(column: dict[str, Any], evidence: dict[str, Any])
     return {key: value for key, value in detail.items() if value not in (None, [], "")}
 
 
-def _compact_evidence_pack_for_prompt(dataset: CsvDataset) -> dict[str, Any]:
+def _compact_evidence_pack_for_prompt(dataset: CsvDataset, question: str | None = None, overview: bool = False) -> dict[str, Any]:
     evidence_pack = dataset.profile.get("evidence_pack", {})
     relation_evidence = evidence_pack.get("relation_evidence") if isinstance(evidence_pack, dict) else []
     guideline_tables = set(_guideline_table_names(dataset))
     business_tables = [name for name in dataset.tables if name not in guideline_tables]
+    relevant_tables = set(_relevant_table_names(dataset, question or "", overview=overview))
     filtered_relations = [
         relation
         for relation in (relation_evidence or [])
@@ -588,12 +615,18 @@ def _compact_evidence_pack_for_prompt(dataset: CsvDataset) -> dict[str, Any]:
                 "table_role": "guideline" if table_name in guideline_tables else "business_data",
                 "row_count": int(len(df)),
                 "column_count": int(len(df.columns)),
-                "head_rows": _limit_rows(df.head(PROMPT_PROFILE_ROW_LIMIT).to_dict(orient="records"), PROMPT_PROFILE_ROW_LIMIT),
-                "random_sample_rows": _limit_rows(
-                    df.sample(n=min(PROMPT_PROFILE_ROW_LIMIT, len(df)), random_state=0).to_dict(orient="records")
-                    if len(df)
-                    else [],
-                    PROMPT_PROFILE_ROW_LIMIT,
+                **(
+                    {
+                        "head_rows": _limit_rows(df.head(PROMPT_PROFILE_ROW_LIMIT).to_dict(orient="records"), PROMPT_PROFILE_ROW_LIMIT),
+                        "random_sample_rows": _limit_rows(
+                            df.sample(n=min(PROMPT_PROFILE_ROW_LIMIT, len(df)), random_state=0).to_dict(orient="records")
+                            if len(df)
+                            else [],
+                            PROMPT_PROFILE_ROW_LIMIT,
+                        ),
+                    }
+                    if overview or table_name in relevant_tables
+                    else {"sample_note": "omitted_from_prompt_for_speed; full DataFrame remains available"}
                 ),
             }
             for table_name, df in dataset.tables.items()
@@ -601,6 +634,59 @@ def _compact_evidence_pack_for_prompt(dataset: CsvDataset) -> dict[str, Any]:
         "relation_evidence": filtered_relations[:PROMPT_RELATION_LIMIT],
         "relation_evidence_note": "candidate relations only; LLM must decide whether a join is needed and code must use real table/column names.",
     }
+
+
+def _relevant_table_names(dataset: CsvDataset, question: str, *, overview: bool) -> list[str]:
+    if overview or not question or len(dataset.tables) <= 1:
+        return list(dataset.tables)
+    guideline_tables = set(_guideline_table_names(dataset))
+    question_text = question.lower()
+    scored: list[tuple[int, str]] = []
+    for table_name, df in dataset.tables.items():
+        if table_name in guideline_tables:
+            scored.append((2, table_name))
+            continue
+        score = 0
+        lowered_name = table_name.lower()
+        if lowered_name and lowered_name in question_text:
+            score += 8
+        context = dataset.csv_texts.get(table_name, "")
+        profile = dataset.profiles_by_table.get(table_name, {})
+        column_names = [str(column.get("name") or "") for column in profile.get("columns", [])]
+        for token in _question_terms(question):
+            if token in lowered_name:
+                score += 4
+            if any(token in column.lower() for column in column_names):
+                score += 3
+            if token in context.lower()[:4000]:
+                score += 2
+        if score:
+            scored.append((score, table_name))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    selected = [name for _, name in scored[:6]]
+    for name in dataset.tables:
+        if name in guideline_tables and name not in selected:
+            selected.append(name)
+    return selected or list(dataset.tables)[:6]
+
+
+def _question_terms(question: str) -> list[str]:
+    chunks = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|\d{4,8}|[\u4e00-\u9fff]{2,}", question.lower())
+    terms: list[str] = []
+    for chunk in chunks:
+        if len(chunk) <= 1:
+            continue
+        terms.append(chunk)
+        if re.search(r"[\u4e00-\u9fff]", chunk) and len(chunk) > 3:
+            for size in (2, 3, 4):
+                terms.extend(chunk[index : index + size] for index in range(0, len(chunk) - size + 1))
+    stop_terms = {"什么", "多少", "如何", "一下", "这些", "文件", "展示", "分析", "每月", "分别", "是否", "一个"}
+    output: list[str] = []
+    for term in terms:
+        if term in stop_terms or term in output:
+            continue
+        output.append(term)
+    return output[:80]
 
 
 def _business_guidelines_for_prompt(dataset: CsvDataset, question: str) -> str:
@@ -771,6 +857,117 @@ def normalize_response_sections(sections: Any, execution: dict[str, Any]) -> dic
     return normalized
 
 
+def generate_result_response_sections(
+    *,
+    dataset: CsvDataset,
+    question: str,
+    conversation_history: list[dict[str, Any]],
+    llm_payload: dict[str, Any],
+    execution: dict[str, Any],
+    chart: dict[str, Any],
+    fallback_sections: dict[str, Any],
+    llm_client: LlmClient,
+) -> dict[str, Any]:
+    prompt = build_result_sections_prompt(
+        dataset=dataset,
+        question=question,
+        conversation_history=conversation_history,
+        llm_payload=llm_payload,
+        execution=execution,
+        chart=chart,
+        fallback_sections=fallback_sections,
+    )
+    try:
+        section_client = _llm_client_with_timeout(
+            llm_client,
+            int(os.getenv("VDS_LITE_RESPONSE_LLM_TIMEOUT_SECONDS", "20")),
+        )
+        raw = section_client.complete(prompt)
+        payload = parse_json_object(raw)
+    except Exception:
+        return fallback_sections
+    if "pandas_code" in payload or "chart_spec" in payload:
+        return fallback_sections
+    sections = payload.get("response_sections") if isinstance(payload.get("response_sections"), dict) else payload
+    return normalize_response_sections(sections, execution)
+
+
+def _llm_client_with_timeout(llm_client: LlmClient, timeout_seconds: int) -> LlmClient:
+    if timeout_seconds <= 0:
+        return llm_client
+    if is_dataclass(llm_client) and hasattr(llm_client, "timeout_seconds"):
+        try:
+            return replace(llm_client, timeout_seconds=timeout_seconds)
+        except Exception:
+            return llm_client
+    return llm_client
+
+
+def build_result_sections_prompt(
+    *,
+    dataset: CsvDataset,
+    question: str,
+    conversation_history: list[dict[str, Any]],
+    llm_payload: dict[str, Any],
+    execution: dict[str, Any],
+    chart: dict[str, Any],
+    fallback_sections: dict[str, Any],
+) -> str:
+    result_context = {
+        "direct_answer": execution.get("direct_answer"),
+        "columns": execution.get("columns") or [],
+        "rows_sample": (execution.get("rows") or [])[:30],
+        "row_count": len(execution.get("rows") or []),
+        "chart": {
+            "chart_type": chart.get("chart_type"),
+            "title": chart.get("title"),
+            "x": chart.get("x"),
+            "y": chart.get("y"),
+            "reason": chart.get("reason"),
+        },
+        "semantic_interpretation": llm_payload.get("semantic_interpretation"),
+        "assumptions": llm_payload.get("assumptions"),
+        "fallback_sections": fallback_sections,
+    }
+    profile_context = {
+        "dataset_id": dataset.dataset_id,
+        "tables": [
+            {
+                "table_name": table.get("table_name"),
+                "table_role": table.get("table_role"),
+                "row_count": table.get("row_count"),
+                "column_count": table.get("column_count"),
+                "candidate_columns": table.get("candidate_columns"),
+            }
+            for table in _compact_profile_for_prompt(dataset, question=question).get("tables", [])[:12]
+        ],
+    }
+    history_context = _history_context(conversation_history[-4:])
+    return f"""你是 VDS Lite 的结果解读器。你不写代码、不重新计算、不改数字；你的任务是基于已经执行完成的 Pandas 结果，写出更像资深数据分析师的用户可见说明。
+
+硬约束：
+1. 只输出 JSON 对象，不要 markdown。
+2. JSON 必须只有 result_summary、analysis、insights、next_steps 四个字段。
+3. result_summary 第一屏先给直接结论，不要重复“已完成分析”。
+4. analysis 写清楚用了什么口径、筛选、聚合、排序或图表编码，但不要泛泛描述。
+5. insights 必须从真实 rows_sample、direct_answer、图表和问题中提炼，点名关键对象、峰值、低谷、差距、异常或趋势；不能写“可观察趋势”这种空话。
+6. next_steps 给 2-4 个自然追问，必须贴合当前结果中的对象、时间、指标或异常点。
+7. 不允许编造 rows_sample 中没有的数字；如果需要提到数字，只能使用 result_context 中已有数字。
+
+用户问题：
+{question}
+
+对话历史：
+{history_context}
+
+执行结果和现有说明：
+{json.dumps(result_context, ensure_ascii=False, indent=2)}
+
+数据结构摘要：
+{json.dumps(profile_context, ensure_ascii=False, indent=2)}
+"""
+
+
 def _section_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return [item for item in value if item not in (None, "")]
@@ -841,8 +1038,8 @@ def build_verifier_prompt(
     execution: dict[str, Any],
     pandas_code: str,
 ) -> str:
-    profile_json = json.dumps(_compact_profile_for_prompt(dataset), ensure_ascii=False, indent=2)
-    evidence_pack_json = json.dumps(_compact_evidence_pack_for_prompt(dataset), ensure_ascii=False, indent=2)
+    profile_json = json.dumps(_compact_profile_for_prompt(dataset, question=question), ensure_ascii=False, separators=(",", ":"))
+    evidence_pack_json = json.dumps(_compact_evidence_pack_for_prompt(dataset, question=question), ensure_ascii=False, separators=(",", ":"))
     business_guidelines = _business_guidelines_for_prompt(dataset=dataset, question=question)
     history_context = _history_context(conversation_history)
     result_json = json.dumps(
