@@ -43,17 +43,27 @@ class OpenAICompatibleClient:
 
 def create_llm_client() -> OpenAICompatibleClient:
     _load_local_env()
-    provider = (os.getenv("VDS_LITE_LLM_PROVIDER") or os.getenv("VDS_LLM_PROVIDER") or "openai").lower()
+    provider = _selected_provider()
     if provider == "deepseek":
         api_key = _required_env("DEEPSEEK_API_KEY")
         base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
         model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-    else:
+    elif provider == "openai":
         api_key = _required_env("OPENAI_API_KEY")
         base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    else:
+        raise RuntimeError(f"Unsupported LLM provider: {provider}")
     timeout_seconds = int(os.getenv("VDS_LITE_LLM_TIMEOUT_SECONDS") or os.getenv("VDS_LLM_TIMEOUT_SECONDS") or "60")
     return OpenAICompatibleClient(api_key=api_key, base_url=base_url, model=model, timeout_seconds=timeout_seconds)
+
+
+def _selected_provider() -> str:
+    for name in ("VDS_LITE_LLM_PROVIDER", "VDS_LLM_PROVIDER"):
+        provider = (os.getenv(name) or "").strip().lower()
+        if provider and provider != "mock":
+            return provider
+    return "deepseek"
 
 
 def _required_env(name: str) -> str:

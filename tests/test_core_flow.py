@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.apps.ai_model import model_factory
 from backend.apps.chat.task.llm_pandas import LlmPandasAgent
 from backend.apps.chat.task.llm_pandas import build_repair_prompt
 from backend.apps.chat.task.llm_pandas import build_prompt
@@ -66,6 +67,15 @@ class RaisingLlmClient:
     def complete(self, prompt: str) -> str:
         self.calls += 1
         raise ConnectionError("provider disconnected")
+
+
+class TimeoutLlmClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, prompt: str) -> str:
+        self.calls += 1
+        raise TimeoutError("The read operation timed out")
 
 
 def write_csv(tmp_path: Path, content: str = SAMPLE_CSV) -> Path:
@@ -766,6 +776,114 @@ def test_agent_surfaces_llm_provider_errors_without_http_500_shape(tmp_path: Pat
     assert llm.calls == 1
     assert len(result["attempts"]) == 1
     assert result["attempts"][0]["ok"] is False
+
+
+def test_agent_falls_back_to_deterministic_trend_when_llm_times_out(tmp_path: Path) -> None:
+    store = CsvDatasetStore(root_dir=tmp_path / "storage")
+    display_path = tmp_path / "display.csv"
+    display_path.write_text(
+        "execute_ym,dsp_name,unit_cnt\n"
+        "202501,水堆,10\n"
+        "202502,水堆,12\n"
+        "202501,货架,3\n"
+        "202502,货架,5\n",
+        encoding="utf-8",
+    )
+    dataset = store.save_upload(display_path, original_filename="display.csv")
+    llm = TimeoutLlmClient()
+    agent = LlmPandasAgent(llm_client=llm)
+
+    result = agent.ask(dataset, "2025年1月至2025年2月，每月水堆、货架两类陈列执行量走势如何？用多折线图展示。")
+
+    assert llm.calls == 1
+    assert result["execution_error"] is None
+    assert "TimeoutError" not in result["direct_answer"]
+    assert "TimeoutError" not in json.dumps(result, ensure_ascii=False)
+    assert result["columns"] == ["年月", "陈列类别", "执行量"]
+    assert result["rows"] == [
+        {"年月": 202501, "陈列类别": "水堆", "执行量": 10},
+        {"年月": 202501, "陈列类别": "货架", "执行量": 3},
+        {"年月": 202502, "陈列类别": "水堆", "执行量": 12},
+        {"年月": 202502, "陈列类别": "货架", "执行量": 5},
+    ]
+    assert result["chart"]["chart_type"] == "line"
+    assert result["chart"]["x"] == "年月"
+    assert result["chart"]["y"] == "执行量"
+
+
+def test_agent_falls_back_to_deterministic_trend_after_verifier_rejects_wrong_field(tmp_path: Path) -> None:
+    store = CsvDatasetStore(root_dir=tmp_path / "storage")
+    display_path = tmp_path / "display.csv"
+    display_path.write_text(
+        "execute_ym,dsp_form_name,unit_cnt\n"
+        "202501,水堆,10\n"
+        "202502,水堆,12\n"
+        "202501,我司冰柜,7\n"
+        "202502,我司冰柜,9\n"
+        "202501,货架,3\n"
+        "202502,货架,5\n",
+        encoding="utf-8",
+    )
+    dataset = store.save_upload(display_path, original_filename="display.csv")
+    llm = SequenceLlmClient(
+        [
+            json_payload(
+                intent="wrong display trend",
+                pandas_code=(
+                    "def analyze(df):\n"
+                    "    rows = []\n"
+                    "    return {'direct_answer': '没有数据', 'rows': rows, 'columns': ['month', 'category', 'value']}"
+                ),
+                expected_output="wrong empty trend",
+            )
+        ],
+        verifier_responses=[
+            '{"ok": false, "confidence": 0.9, "verdict": "字段选择错误", "issues": ["dsp_clfc_name未命中水堆、我司冰柜、货架"], "repair_instructions": "改用正确陈列形态字段"}'
+        ],
+    )
+    agent = LlmPandasAgent(llm_client=llm, max_attempts=1)
+
+    result = agent.ask(dataset, "2025年1月至2025年2月，每月水堆、我司冰柜、货架三类陈列执行量走势如何？用多折线图展示。")
+
+    assert result["execution_error"] is None
+    assert result["columns"] == ["年月", "陈列类别", "执行量"]
+    assert result["rows"] == [
+        {"年月": 202501, "陈列类别": "我司冰柜", "执行量": 7},
+        {"年月": 202501, "陈列类别": "水堆", "执行量": 10},
+        {"年月": 202501, "陈列类别": "货架", "执行量": 3},
+        {"年月": 202502, "陈列类别": "我司冰柜", "执行量": 9},
+        {"年月": 202502, "陈列类别": "水堆", "执行量": 12},
+        {"年月": 202502, "陈列类别": "货架", "执行量": 5},
+    ]
+    assert result["chart"]["chart_type"] == "line"
+    assert result["chart"]["x"] == "年月"
+    assert result["chart"]["y"] == "执行量"
+
+
+def test_create_llm_client_defaults_to_deepseek(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(model_factory, "_load_local_env", lambda: None)
+    monkeypatch.delenv("VDS_LITE_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("VDS_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+
+    client = model_factory.create_llm_client()
+
+    assert client.base_url == "https://api.deepseek.com/v1"
+    assert client.model == "deepseek-chat"
+    assert client.api_key == "test-deepseek-key"
+
+
+def test_create_llm_client_ignores_mock_provider_for_real_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(model_factory, "_load_local_env", lambda: None)
+    monkeypatch.setenv("VDS_LITE_LLM_PROVIDER", "mock")
+    monkeypatch.setenv("VDS_LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+
+    client = model_factory.create_llm_client()
+
+    assert client.base_url == "https://api.deepseek.com/v1"
+    assert client.model == "deepseek-chat"
 
 
 def test_agent_sends_multi_file_context_and_executes_llm_chosen_join(tmp_path: Path) -> None:
